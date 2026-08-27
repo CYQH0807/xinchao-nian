@@ -1,59 +1,24 @@
-# MODIFICATIONS — 心潮念对 Ombre Brain 的修改
+# 心潮念对 Ombre Brain v3.6.3 的本地兼容修改
 
-本目录的 Ombre Brain 源码是**衍生版本**，血统与许可证：
+本目录是 P0luz/Ombre-Brain v3.6.3 的 vendored 快照。完整上游许可和说明保留在
+`LICENSE`、`NOTICE.md`、`README.md` 与 `CHANGELOG.md`。
 
-```
-P0luz/Ombre-Brain（原项目, MIT, © P0lar1zzZ）
-  → CyberSealNull 二改（在原 MIT 之上追加"新增内容非商业"约束）
-    → 心潮念（本仓库）在其基础上做了下面的修改
-```
+## 本地修改
 
-- 原项目：https://github.com/P0luz/Ombre-Brain  （MIT，见 `LICENSE.P0luz-MIT`）
-- 二改仓库：CyberSealNull（fork of P0luz，见 `LICENSE.CyberSealNull` / `NOTICE.CyberSealNull.md`；
-  其新增内容仅限个人 / 学习 / 非商业，商用需该 fork 维护者书面许可）
-- 本版本基线：`VERSION` = 2.6.5
+1. `src/tools/breath/_verbatim.py`
+   - 在每条浮现记忆的表头追加结构化 `[domain:...] [tags:...]`。
+   - 不改写磁盘正文，继续保留 v3.6.3 的双链清理、第三方发言归属和关系提示逻辑。
+   - 供心潮的记忆共振按结构化主题计算亲和度。
+2. `src/web/buckets.py`
+   - 增加 sidecar 专用 `GET /api/bucket-map` 与 `GET /api/bucket-preview/{bucket_id}`。
+   - 使用独立的 `OMBRE_MCP_SERVICE_TOKEN` Bearer 校验、严格 ID 校验和泛化错误响应；星图不返回正文。
+3. 心潮念根目录的 Compose
+   - 将新版 Ombre 快照作为本地构建上下文，并默认跳过不必要的 cloudflared 下载。
 
-## 心潮念在此基础上的改动
+## 破坏性操作边界
 
-1. **breath-meta（记忆共振依赖）**
-   - `src/tools/breath/_verbatim.py`：`breath` 返回时，在每条桶的表头带上结构化
-     `[domain:…] [tags:…]`（新增 `_affinity_meta()`）。
-   - 目的：让上层的"心潮"动态心智直接按 domain 算亲和度、把浮现的记忆回推到驱力
-     （记忆共振），不用猜关键词。additive、向后兼容——老输出没有该表头时按空处理。
+本地兼容层没有恢复旧版 `purge` 等独立硬删除入口。v3.6.3 的生命周期操作统一由 `trace` 控制：
+普通 `delete` 归档，`restore` 恢复，`hard_delete` 只接受明确 `test_data=True` 且必须有
+`delete_reason` 的测试桶。心潮念代理也只允许 v3.6.3 的公共方法名。
 
-2. **压缩/脱水模型默认**（部署配置层，非源码逻辑）
-   - 压缩模型从 GLM-Z1 换成 DeepSeek-V3（11.5s → ~1.0s）。通过 config / 环境变量配置，
-     不改源码。
-
-3. **bucket-map（记忆星图数据源）**
-   - `src/web/buckets.py`：新增 `GET /api/bucket-map`——sidecar 专用（与
-     `/api/bucket-preview` 同一 `OMBRE_MCP_SERVICE_TOKEN` Bearer 边界，不收浏览器
-     cookie）的结构化星表：仅逐桶元数据（id/name/type/domain/tags/情感/重要度/
-     score 等），**不含正文、不含 content_preview / why_remembered**，按 score
-     降序、封顶 800 条。
-   - 目的：pulse 是人类可读摘要，桶多时不含逐桶行，上层"心潮"解析不出星图；
-     星图需要结构化行。additive，不改任何既有路由与工具。
-
-4. **MCP 工具注解（annotations）**
-   - `src/server.py`：12 个 MCP 工具统一声明 `ToolAnnotations`。只有 `breath`、`pulse`
-     标 `readOnlyHint=True`（breath 命中只更新激活计数，不改正文/元数据）；`purge`
-     标 `destructiveHint=True`；其余写工具 readOnly=False。
-   - 目的：claude.ai 等客户端只对 readOnly 工具开放「总是允许」，没有注解时所有工具
-     都只能逐次批准。心潮念 `relabelOb` 原样透传 annotations，上层无需改动。additive。
-
-5. **grow 重复提交去重（幂等重试）**
-   - `src/tools/grow/__init__.py`：按 (content/items, auto, source) 指纹记录最近一次
-     **成功**结果到 `<buckets_dir>/.companion/grow-recent.json`；窗口内
-     （`OMBRE_GROW_DEDUPE_SECONDS`，默认 6h，0=关闭）同样内容再次 grow 直接返回上次结果、
-     不再写桶。失败结果不缓存，照常可重试；账本 IO 出错静默放行。
-   - 目的：客户端（claude.ai 连接器）等不到 grow 返回先超时、服务端其实已写入，上层 AI
-     误以为失败重试，同一段日记被反复拆成新桶。additive，不改任何既有写入路径的行为。
-
-> OB 原生功能全部保留：breath / hold / grow / dream / trace / anchor / release / forget /
-> restore / purge / I / plan / letter / pulse 与 Dashboard。心潮念只做上述增量，不裁剪。
-
-## 合并后整体许可证
-
-心潮念整体**非纯 MIT**：`ombre-brain/` 部分受 CyberSealNull 二改的非商业约束 + P0luz 原 MIT 的
-署名/许可保留要求约束。商业使用需取得上游（P0luz 及 CyberSealNull fork 维护者）的书面许可。
-详见仓库根 `NOTICE`。
+这份文件描述的是当前本地快照；修改完成后如需发布，应在两个仓库分别提交并由人工决定是否推送。

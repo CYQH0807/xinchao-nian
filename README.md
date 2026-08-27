@@ -1,12 +1,12 @@
-# 心潮·念 3.1.0（Xinchao · Nian）
+# 心潮·念 3.2.0（Xinchao · Nian）
 
 一个会**惦记你**的 AI 心智：**心潮**（动态驱力/欲望引擎）+ **Ombre Brain**（记忆库）深度融合，一键联合部署。
 
 - **心潮** 让它有随时间变化的内在状态——想念、期待、挂念、好奇、独处欲……不是每次对话都从零开始。
-- **Ombre Brain** 给它一个真正的长期记忆库——breath 浮现、hold 沉淀、dream 消化、trace 追溯。
+- **Ombre Brain v3.6.3** 给它一个真正的长期记忆库——breath 浮现、hold 沉淀、dream 消化、trace 追溯。
 - **融合** 让"欲望影响记忆影响行动"闭环：驱力偏置召回哪些记忆浮现，浮现的记忆又回推驱力。
 
-## 3.1 更新重点
+## 3.2 更新重点
 
 - **Personality Core 性格内核层**：新增与 12 维当下驱力分离的月度内核，由 AI 自主回顾并通过受鉴权工具完成评分；人类不参与打分。
 - **单向、极慢的基线偏置**：仅批准的 4 组内核维度可以影响对应驱力，偏置硬封顶在 ±10%；驱力不会反向自动改写人格评分。
@@ -14,8 +14,9 @@
 - **引用式记忆关联**：念头与梦可以围绕具体 OB 记忆桶生成，但心潮不按 ID 修改记忆正文；保留来源链和最终落地桶 ID。
 - **饱足期与驱力耦合**：满足后默认保留 2 小时平台期，只暂停自然增长；事件、记忆共振与输出回流仍可正常穿透。
 - **可视化与接入收口**：补齐 Personality Core、待交付处置、记忆关联及公开网页所需的脱敏状态接口。
+- **Ombre v3.6.3 集成**：心潮 `/mcp` 同步暴露新版 16 个基础工具及按开关出现的 `You` / `Them`；旧版 `purge/forget/restore` 不再作为独立代理工具出现，破坏性语义统一由 `trace` 承载。
 
-> 3.1 不改变隐私边界：私有 `personality.json`、状态、记忆与凭据均不进入公开仓库。完整源码说明见 [`xinchao/README.md`](xinchao/README.md)，版本差异见 [`xinchao/CHANGELOG.md`](xinchao/CHANGELOG.md)。
+> 3.2 不改变隐私边界：私有 `personality.json`、状态、记忆与凭据均不进入公开仓库。完整源码说明见 [`xinchao/README.md`](xinchao/README.md)，版本差异见 [`xinchao/CHANGELOG.md`](xinchao/CHANGELOG.md)。
 
 ## 快速开始
 
@@ -129,12 +130,14 @@ AI Runtime。梦境、余韵、思念、内部状态与 AI 自主行动**不允�
 ## 许可证与署名
 
 - 仓库根的联合发行代码标示为 AGPL-3.0；`xinchao/` 目录仍保留其 MIT 许可文件。
-- `ombre-brain/`（Ombre Brain）：基于 P0luz 的 Ombre Brain 与 Yinglianchun 的 fork，
-  **保留其原始许可证与署名**，见 [NOTICE](NOTICE)。本项目对其的修改记录见 `ombre-brain/MODIFICATIONS.md`。
-- 本融合项目**非纯 MIT**；商业使用需取得上游 OB 作者的书面许可。
+- `ombre-brain/`（Ombre Brain）：基于 P0luz/Ombre-Brain v3.6.3 的本地快照，
+  **保留其 MIT 许可证、NOTICE 与原始署名**，见 `ombre-brain/LICENSE`、`ombre-brain/NOTICE.md`。
+  本项目对其的本地兼容修改记录见 `ombre-brain/MODIFICATIONS.md`。
+- 本融合项目是多目录联合发行包；各目录按各自许可证执行，详见 [许可说明](docs/LICENSING.md)。
 
 详细的分目录边界见 [许可说明](docs/LICENSING.md)。根目录的 AGPL 不会覆盖
-`ombre-brain/` 已有的上游非商业约束。
+`ombre-brain/` 保留的上游 MIT 许可证。
 
-> 详细边界见上游来源说明。融合不改变 OB 原生记忆库功能——breath/hold/grow/dream/trace/
-> anchor/release/forget/restore/purge/I/plan/letter/pulse 与 Dashboard 全部保留。
+> 详细边界见上游来源说明。融合不改变 OB 原生记忆库功能——新版 16 个基础 MCP 工具、
+> 可选 `You` / `Them` 与 Dashboard 全部保留；归档、恢复和本地测试数据硬删除统一走 `trace`。
+> 完整方法清单见 [`docs/OMBRE-XINCHAO-METHODS.md`](docs/OMBRE-XINCHAO-METHODS.md)。

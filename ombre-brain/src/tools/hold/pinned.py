@@ -22,8 +22,10 @@ permanent 目录，不衰减、不会被合并掉。
 ========================================
 """
 
+from utils import normalize_memory_title
+
 from .. import _runtime as rt
-from .._common import check_pinned_quota
+from .._common import check_pinned_quota, _quota_turn
 
 
 async def store_pinned(
@@ -32,8 +34,12 @@ async def store_pinned(
     valence: float,
     arousal: float,
     why_remembered: str,
+    title: str = "",
     meaning: str = "",
     media: list | None = None,
+    explicit_domain: list[str] | None = None,
+    source_refs: list[dict] | None = None,
+    quotes: list[dict] | None = None,
 ) -> str:
     try:
         analysis = await rt.dehydrator.analyze(content)
@@ -44,35 +50,53 @@ async def store_pinned(
             "tags": [], "suggested_name": "",
         }
 
-    domain = analysis.get("domain") or ["未分类"]
-    if not isinstance(domain, list):
-        domain = ["未分类"]
+    analyzed_domain = analysis.get("domain") or ["未分类"]
+    if not isinstance(analyzed_domain, list):
+        analyzed_domain = ["未分类"]
+    final_domain = explicit_domain or analyzed_domain
     _v = analysis.get("valence", 0.5)
     _a = analysis.get("arousal", 0.3)
     final_valence = valence if 0 <= valence <= 1 else (float(_v) if _v is not None else 0.5)
     final_arousal = arousal if 0 <= arousal <= 1 else (float(_a) if _a is not None else 0.3)
     _raw_tags = analysis.get("tags") or []
-    all_tags = list(dict.fromkeys((_raw_tags if isinstance(_raw_tags, list) else []) + extra_tags))
+    model_tags = _raw_tags if isinstance(_raw_tags, list) else []
+    all_tags = list(dict.fromkeys(extra_tags if extra_tags else model_tags))
     suggested_name = analysis.get("suggested_name", "")
+    final_title = title or normalize_memory_title(suggested_name)
 
-    err = await check_pinned_quota()
-    if err:
-        return err
+    # 配额判定 + 落盘必须在同一把锁里：两个并发 hold(pinned=True) 都可能在
+    # 对方提交前读到同一个「未满」快照，检查和创建隔着一次 await 就会互相看不见。
+    async with _quota_turn("pinned"):
+        err = await check_pinned_quota()
+        if err:
+            return err
 
-    bucket_id = await rt.bucket_mgr.create(
-        content=content,
-        tags=all_tags,
-        importance=10,
-        domain=domain,
-        valence=final_valence,
-        arousal=final_arousal,
-        name=suggested_name or None,
-        bucket_type="permanent",
-        pinned=True,
-        why_remembered=why_remembered,
-        source_tool="hold",
-        allow_embedding_fallback=True,
-        meaning=meaning,
-        media=media,
-    )
-    return f"📌钉选→{bucket_id} {','.join(str(d) for d in domain if d is not None)}"
+        bucket_id = await rt.bucket_mgr.create(
+            content=content,
+            tags=all_tags,
+            importance=10,
+            domain=final_domain,
+            valence=final_valence,
+            arousal=final_arousal,
+            name=suggested_name or None,
+            title=final_title,
+            source_refs=source_refs,
+            quotes=quotes,
+            bucket_type="permanent",
+            pinned=True,
+            why_remembered=why_remembered,
+            source_tool="hold",
+            event_actor="llm",
+            allow_embedding_fallback=True,
+            meaning=meaning,
+            media=media,
+            defer_derived_index=True,
+        )
+    post_index = getattr(rt.bucket_mgr, "_index_after_update", None)
+    if callable(post_index):
+        await post_index(
+            bucket_id,
+            content_changed=True,
+            meaning_changed=bool(meaning),
+        )
+    return f"📌钉选→{bucket_id} {','.join(str(d) for d in final_domain if d is not None)}"

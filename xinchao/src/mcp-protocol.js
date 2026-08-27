@@ -16,29 +16,72 @@ const INTERACTION_TYPES = new Set([
   'reconciliation',
 ]);
 
-// 心潮念网关：对外暴露的 OB 记忆工具（精简集，purge/restore/letter/plan 不暴露）。
-// hold 保留（2026-08-09 复议：hold 有了 meaning 字段能补上下文，与 grow 不冲突——
-// 日常/日记整理走 grow，重要瞬间可用 hold 但必须写 meaning）。
-// 走代理转发到 OB；schema 在 tools/list 时动态从 OB 拉，永不漂移。
-export const OB_PROXY_TOOLS = ['breath', 'hold', 'grow', 'trace', 'forget', 'dream', 'anchor', 'release', 'I', 'pulse'];
+// 心潮念网关：对外暴露 Ombre v3.6.3 的完整公共 MCP 面。
+// schema 在 tools/list 时动态从 OB 拉，永不漂移；You/ Them 仍遵守 OB 的持久开关。
+// 旧版 forget/restore/purge 已被新版 trace 的归档/恢复/测试数据清理语义取代，故不代理。
+export const OB_PROXY_TOOLS = [
+  'breath', 'breath_search', 'breath_advanced', 'hold', 'grow', 'trace',
+  'dream', 'anchor', 'release', 'pulse', 'plan', 'letter_write',
+  'letter_lock_update', 'letter_read', 'feel', 'I', 'You', 'Them',
+];
 const OB_PROXY_SET = new Set(OB_PROXY_TOOLS);
 
-// 对外用中文标题 + 中文说明（内部名保持不变，用于协议路由）。让顾川看到的是"浮现记忆"而不是"breath"。
+// 对外用中文标题 + 兼容旧客户端的说明（内部名保持不变，用于协议路由）。
+// 新版 OB 自带描述始终优先，避免本地文案遮蔽新参数或新语义。
 const OB_TOOL_LABELS = {
   breath:  { title: '浮现记忆', description: '让当前最相关的长期记忆自然浮现，并带回近期梦境摘要与余韵。用于新窗口开始、上下文断层、或确需重新寻找相关记忆时；不要每条消息调用。' },
+  breath_search: { title: '检索记忆', description: '按关键词或语义检索已有记忆；需要精细过滤时使用 breath_advanced。' },
+  breath_advanced: { title: '精细检索', description: '使用完整过滤参数检索已有记忆，包括标签、重要度、情感坐标、目录和日期范围。' },
   hold:    { title: '沉淀一条', description: '当场存一条重要的短记忆（重要决定、关系变化、有长期意义的话或共同经历）。必须写 meaning 补上下文；不适合普通寒暄、临时信息或每一句对话。' },
   grow:    { title: '整理导入', description: '把一段整理好的内容（如当天日记）按有意义的小节导入，系统自动拆成多条并各自尝试合并。日常/日记整理走这条。' },
-  trace:   { title: '追溯修改', description: '修改一条已存在记忆的字段（重要度、标签、domain、标记已放下/已消化、软删除等）。不要猜 id、不要自行改写正文。' },
-  forget:  { title: '淡忘归档', description: '软删除一条记忆：移入归档、不再参与浮现，正文保留、可恢复。' },
+  trace:   { title: '追溯修改', description: '修改一条已存在记忆的字段。delete=True 只归档；restore=True 恢复；hard_delete=True 仅清理明确标记为 test_data 的测试桶并必须给出原因。不要猜 id。' },
   dream:   { title: '消化梦境', description: '长期记忆的离线消化，产出梦境余韵。不是睡眠梦境、也不触发推送。' },
   anchor:  { title: '设为锚点', description: '把一条记忆设为坐标系锚点：不主动浮现，但被查询或情感命中时仍返回。有数量上限，满了需先解锚。' },
   release: { title: '解除锚点', description: '取消某条记忆的锚点标记。' },
-  I:       { title: '自我沉淀', description: '自我认知先落成候选记忆，被多个不同日期的消化见证过才升级为长期。学习来源是时间和反复存活，不是谁的认可。' },
   pulse:   { title: '记忆脉动', description: '读取记忆库整体状态的脉搏（数量、分布等元信息）。' },
+  plan:    { title: '登记承诺', description: '登记一个待办、承诺或未闭环事项；后续用 trace 更新状态。' },
+  letter_write: { title: '写一封信', description: '写下一封长期保存的信，可选择定时或永久上锁。' },
+  letter_lock_update: { title: '调整信件锁', description: '只调整已有信件的锁定状态，不修改正文或署名。' },
+  letter_read: { title: '读取信件', description: '检索历史信件；信件正文不压缩、不改写。' },
+  feel:    { title: '找回感受', description: '按当前在想的事情找回过去留下的感受。' },
+  I:       { title: '自我沉淀', description: '自我认知先落成候选记忆，被多个不同日期的消化见证过才升级为长期。学习来源是时间和反复存活，不是谁的认可。' },
+  You:     { title: '认识人类', description: '读取或沉淀我对人类一方形成的长期认识；写入需要真实记忆桶作为依据。' },
+  Them:    { title: '认识他人', description: '读取或沉淀我对其他人形成的长期认识；写入需要真实记忆桶作为依据。' },
 };
+
+const OB_TOOL_ANNOTATIONS = {
+  breath: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  breath_search: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  breath_advanced: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  hold: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+  grow: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  trace: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
+  dream: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  anchor: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  release: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  pulse: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  plan: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+  letter_write: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+  letter_lock_update: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  letter_read: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  feel: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  I: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+  You: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
+  Them: { readOnlyHint: false, destructiveHint: true, idempotentHint: false, openWorldHint: false },
+};
+
 function relabelOb(tool) {
   const lab = OB_TOOL_LABELS[tool?.name];
-  return lab ? { ...tool, title: lab.title, description: lab.description } : tool;
+  if (!lab) return tool;
+  const result = { ...tool, title: lab.title };
+  if (!result.description) result.description = lab.description;
+  if (tool?.name === 'hold') {
+    result.description = `${result.description} 本心潮入口默认异步：调用成功只表示任务已可靠入队，会立即返回 job_id；请用 xinchao_hold_status 查询实际 Ombre 落地结果，失败时用 xinchao_hold_retry 重试。`;
+  }
+  if (!result.annotations && OB_TOOL_ANNOTATIONS[tool.name]) {
+    result.annotations = OB_TOOL_ANNOTATIONS[tool.name];
+  }
+  return result;
 }
 
 export const XINCHAO_TOOLS = [
@@ -239,6 +282,34 @@ export const XINCHAO_TOOLS = [
       additionalProperties: false,
     },
     annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  },
+  {
+    name: 'xinchao_hold_status',
+    title: '查询记忆沉淀任务',
+    description: '查询默认异步 hold 的落地状态。只返回任务状态、重试信息和 Ombre bucket id，不返回已入队的原始正文。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        job_id: { type: 'string', minLength: 1, maxLength: 160, description: 'hold 返回的任务 id。' },
+      },
+      required: ['job_id'],
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+  },
+  {
+    name: 'xinchao_hold_retry',
+    title: '重试记忆沉淀任务',
+    description: '把失败的 hold 任务重新排队。已经成功落地的任务不会重复写入；正在执行的任务也不会被并发重放。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        job_id: { type: 'string', minLength: 1, maxLength: 160, description: 'hold 返回的任务 id。' },
+      },
+      required: ['job_id'],
+      additionalProperties: false,
+    },
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
   },
   {
     name: 'xinchao_personality_reflect',
@@ -549,6 +620,19 @@ function pendingConsumedArgs(args = {}) {
   return { ids };
 }
 
+function holdJobIdArgs(args = {}) {
+  const jobId = String(args.job_id ?? '').trim().slice(0, 160);
+  if (!jobId) throw new Error('job_id 是必填项');
+  return { jobId };
+}
+
+function holdJobStatusText(job) {
+  const bucketId = job?.result?.ombreBucketId ? ` bucket_id=${job.result.ombreBucketId}` : '';
+  const error = job?.lastError ? ` error=${job.lastError}` : '';
+  const next = job?.nextAttemptAt ? ` next=${job.nextAttemptAt}` : '';
+  return `hold 任务 ${job?.id ?? ''}：status=${job?.status ?? 'unknown'} attempts=${job?.attempts ?? 0}${bucketId}${error}${next}`;
+}
+
 function personalityReflectArgs(args = {}) {
   return {
     month: String(args.month ?? '').trim(),
@@ -557,7 +641,7 @@ function personalityReflectArgs(args = {}) {
   };
 }
 
-async function callTool(name, args, handlers) {
+async function callTool(name, args, handlers, requestContext = {}) {
   const fallbackSessionId = handlers.defaultSessionId ?? '';
   if (name === 'xinchao_context') {
     const envelope = await handlers.context(contextArgs(args, fallbackSessionId));
@@ -592,6 +676,17 @@ async function callTool(name, args, handlers) {
   if (name === 'xinchao_pending_consumed') {
     const result = await handlers.pendingConsumed(pendingConsumedArgs(args));
     return toolText(`已回执说出口：${result.consumed.length} 条`, result);
+  }
+  if (name === 'xinchao_hold_status') {
+    if (!handlers.holdJobStatus) throw new Error('hold 异步任务队列未接入');
+    const result = await handlers.holdJobStatus(holdJobIdArgs(args));
+    if (!result) throw new Error('hold_job_not_found');
+    return toolText(holdJobStatusText(result), result);
+  }
+  if (name === 'xinchao_hold_retry') {
+    if (!handlers.holdJobRetry) throw new Error('hold 异步任务队列未接入');
+    const result = await handlers.holdJobRetry(holdJobIdArgs(args));
+    return toolText(`hold 任务已重新排队：job_id=${result.id} status=${result.status}`, result);
   }
   if (name === 'xinchao_personality_reflect') {
     if (!handlers.personalityReflect) throw new Error('性格内核私有存储未接入');
@@ -668,9 +763,12 @@ async function callTool(name, args, handlers) {
   }
   if (OB_PROXY_SET.has(name)) {
     if (!handlers.callOb) throw new Error('OB 记忆后端未接入');
-    const raw = await handlers.callOb(name, args);
+    const raw = await handlers.callOb(name, args, requestContext);
     const payload = raw?.result ?? raw;
     if (payload && Array.isArray(payload.content)) return payload;
+    if (name === 'hold' && payload?.accepted) {
+      return toolText(`hold 已可靠入队：job_id=${payload.job_id} status=${payload.status}`, payload);
+    }
     return toolText(typeof payload === 'string' ? payload : JSON.stringify(payload ?? {}));
   }
   throw new Error(`未知工具：${name}`);
@@ -731,7 +829,10 @@ export async function handleMcpMessage(payload, handlers) {
   }
   if (method === 'tools/call') {
     try {
-      const result = await callTool(String(params.name ?? ''), params.arguments ?? {}, handlers);
+      const result = await callTool(String(params.name ?? ''), params.arguments ?? {}, handlers, {
+        requestId: id,
+        sessionId: handlers.defaultSessionId ?? '',
+      });
       return { status: 200, body: response(id, result) };
     } catch (error) {
       return { status: 200, body: response(id, toolError(error.message)) };

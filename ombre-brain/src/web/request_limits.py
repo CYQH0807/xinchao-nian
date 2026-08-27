@@ -11,9 +11,25 @@ _Send = Callable[[dict], Awaitable[None]]
 _REJECTION_DRAIN_MULTIPLIER = 2
 
 
+# 唯一的公开 MCP 端点。
+#
+# `/mcp-extra` 在 2.8.5 退役、3.2.0 随信件恢复、3.4.0 随信件并回主链路再次退役。
+# 它从这里移除后不再被当作 MCP 路径：路由已经不存在，请求会 404，而在 404 之前
+# 先落到管理面的体积限制上——这比继续认它更严，是想要的方向。
+_MCP_ENDPOINT_PATHS = frozenset({"/mcp"})
+
+
 def is_mcp_endpoint_path(path: object) -> bool:
-    """Match the one public MCP endpoint without accepting prefix lookalikes."""
-    return str(path or "").rstrip("/") == "/mcp"
+    """Match the public MCP endpoints without accepting prefix lookalikes."""
+    return str(path or "").rstrip("/") in _MCP_ENDPOINT_PATHS
+
+
+def is_sse_endpoint_path(path: object) -> bool:
+    """Match FastMCP's legacy SSE handshake and message endpoints."""
+    normalized = str(path or "").rstrip("/") or "/"
+    return normalized == "/sse" or normalized == "/messages" or normalized.startswith(
+        "/messages/"
+    )
 
 
 class MCPRequestBodyLimitMiddleware:
@@ -144,11 +160,17 @@ _LARGE_UPLOAD_PATHS = {
 class ManagementRequestBodyLimitMiddleware(MCPRequestBodyLimitMiddleware):
     """Bound normal Dashboard/OAuth mutations while preserving large upload APIs."""
 
-    def __init__(self, app, *, max_bytes: int) -> None:
+    def __init__(
+        self,
+        app,
+        *,
+        max_bytes: int,
+        mcp_path_matcher: Callable[[object], bool] = is_mcp_endpoint_path,
+    ) -> None:
         def should_limit(path: object) -> bool:
             normalized = str(path or "").rstrip("/") or "/"
             return (
-                not is_mcp_endpoint_path(normalized)
+                not mcp_path_matcher(normalized)
                 and normalized not in _LARGE_UPLOAD_PATHS
             )
 

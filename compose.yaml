@@ -18,6 +18,8 @@ services:
         # 国内 VPS 直连官方 PyPI 常卡死；在 .env 里填 PIP_INDEX_URL 即可走镜像（Dockerfile 已支持）
         PIP_INDEX_URL: ${PIP_INDEX_URL:-}
         PIP_TRUSTED_HOST: ${PIP_TRUSTED_HOST:-}
+        # 本地联合部署默认不下载 cloudflared；需要 Dashboard Tunnel 时设为 1。
+        INSTALL_CLOUDFLARED: ${INSTALL_CLOUDFLARED:-0}
     image: xinchao-nian/ombre-brain:local
     container_name: ombre-brain
     restart: unless-stopped
@@ -34,6 +36,9 @@ services:
       - OMBRE_EMBED_MODEL=${OMBRE_EMBED_MODEL:-}
       - OMBRE_DASHBOARD_PASSWORD=${OMBRE_DASHBOARD_PASSWORD}
       - OMBRE_MCP_REQUIRE_AUTH=true
+      # 联合部署同时保留 OAuth，并允许心潮用静态内部令牌调用 Ombre。
+      - OMBRE_MCP_AUTH_MODE=${OMBRE_MCP_AUTH_MODE:-hybrid}
+      - OMBRE_MCP_TOKEN=${OMBRE_MCP_TOKEN:-}
       - OMBRE_MCP_SERVICE_TOKEN=${OMBRE_MCP_SERVICE_TOKEN:-}
       - OMBRE_TRUSTED_PROXY_CIDRS=${OMBRE_TRUSTED_PROXY_CIDRS:-127.0.0.0/8,::1/128}
       # sidecar：OB 在内部网络里读心潮的"此刻状态"

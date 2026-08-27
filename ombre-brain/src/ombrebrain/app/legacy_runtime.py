@@ -149,10 +149,6 @@ class LegacyRuntime:
         )
         return self.fabric.append_event(event)
 
-    def purge_bucket_events(self, bucket_id: str) -> int:
-        """Remove v3 fabric copies for a forgotten or purged legacy bucket."""
-        return self.fabric.purge_legacy_bucket(str(bucket_id))
-
     def record_tool_event(self, tool_name: str, payload: dict[str, object] | None = None) -> int:
         name = str(tool_name)
         legacy_payload = _json_safe(payload or {})

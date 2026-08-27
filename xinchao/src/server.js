@@ -23,6 +23,7 @@ import { SYSTEM_VERSION } from './version.js';
 import { memoryConnectionState } from './connection-diagnostics.js';
 import { PersonalityStore, computePersonalityStats } from './personality-store.js';
 import { addPending, dropPending, holdPending, markConsumed, markDelivered, markHoldSyncResult, selectForHoldSync } from './pending-queue.js';
+import { HoldJobStore } from './hold-job-queue.js';
 
 const config = validateConfig(loadConfig());
 if (!config.serviceToken) throw new Error('SERVICE_TOKEN is required');
@@ -37,6 +38,7 @@ if (config.serviceToken.length < 32) {
 const store = new StateStore(config.statePath, () => newState());
 const model = new ModelClient(config.model);
 const ombre = new OmbreClient(config.ombre);
+const holdJobs = new HoldJobStore(config.holdJobsPath);
 const bark = new BarkClient(config.bark);
 const journal = new TransitionJournal(config.journalPath);
 const oauth = new OAuthProvider(config.oauth, (event, fields = {}) => log(event, fields));
@@ -50,10 +52,79 @@ const cabin = new CabinStore(config.cabin.statePath, config.cabin);
 const personality = new PersonalityStore(config.personalityPath);
 const bridgeStreams = new Set();
 await oauth.init();
+await holdJobs.init();
 let cyclePromise = null;
+let holdWorkerPromise = null;
 
 function log(event, fields = {}) {
   console.log(JSON.stringify({ at: new Date().toISOString(), event, ...fields }));
+}
+
+function holdRequestKey(args, requestContext = {}) {
+  const requestId = String(requestContext.requestId ?? '').trim();
+  if (!requestId) return `unkeyed:${randomUUID()}`;
+  const sessionId = String(requestContext.sessionId ?? '').trim() || 'unknown-session';
+  return `mcp:${sessionId}:${requestId}:${JSON.stringify(args)}`;
+}
+
+async function enqueueOmbreHold(args, requestContext = {}) {
+  if (!config.ombre.writeEnabled) throw new Error('ombre_write_disabled');
+  const result = await holdJobs.enqueue(args, holdRequestKey(args, requestContext));
+  void kickHoldWorker().catch((error) => log('ombre_hold_worker_failed', { message: error.message }));
+  return {
+    accepted: true,
+    job_id: result.job.id,
+    status: result.job.status,
+    duplicate: result.duplicate,
+  };
+}
+
+async function drainHoldJobs() {
+  while (true) {
+    const job = await holdJobs.claimNext();
+    if (!job) return;
+    try {
+      const result = await ombre.hold(job.payload, config.ombre.holdTimeoutMs);
+      const completed = await holdJobs.complete(job.id, result);
+      log('ombre_hold_job_succeeded', {
+        jobId: job.id,
+        bucketId: completed.result?.ombreBucketId ?? null,
+        attempts: completed.attempts,
+      });
+    } catch (error) {
+      try {
+        const failed = await holdJobs.fail(job.id, error);
+        log('ombre_hold_job_failed', {
+          jobId: job.id,
+          status: failed.status,
+          attempts: failed.attempts,
+          message: failed.lastError,
+        });
+      } catch (recordError) {
+        log('ombre_hold_job_failure_record_failed', {
+          jobId: job.id,
+          message: recordError.message,
+          originalError: error.message,
+        });
+      }
+    }
+  }
+}
+
+function kickHoldWorker() {
+  if (holdWorkerPromise) return holdWorkerPromise;
+  holdWorkerPromise = drainHoldJobs().finally(() => { holdWorkerPromise = null; });
+  return holdWorkerPromise;
+}
+
+async function getOmbreHoldJob({ jobId }) {
+  return holdJobs.get(jobId);
+}
+
+async function retryOmbreHoldJob({ jobId }) {
+  const job = await holdJobs.retry(jobId);
+  void kickHoldWorker().catch((error) => log('ombre_hold_worker_failed', { message: error.message }));
+  return job;
 }
 
 async function updateState(meta, mutate) {
@@ -1235,6 +1306,8 @@ const server = createServer(async (request, response) => {
         personalityAnchorUpdate: async (input) => personality.updateAnchors(input),
         cabinInbox: async () => cabin.unlockedUserNotes(),
         cabinNote: async (note) => cabin.addNote({ ...note, from: 'ai', locked: false }),
+        holdJobStatus: async ({ jobId }) => getOmbreHoldJob({ jobId }),
+        holdJobRetry: async ({ jobId }) => retryOmbreHoldJob({ jobId }),
         // 公共留言板：只有配了令牌才把 board_post / board_read 工具暴露出来 / 接受调用。
         boardEnabled: boardEnabled(config),
         boardPost: async ({ content }) => postBoardMessage(config, content),
@@ -1244,7 +1317,9 @@ const server = createServer(async (request, response) => {
           if (!config.ombre.readEnabled) return [];
           return ombre.listTools();
         },
-        callOb: async (name, args) => ombre.call(name, args),
+        callOb: async (name, args, requestContext) => name === 'hold'
+          ? enqueueOmbreHold(args, requestContext)
+          : ombre.call(name, args),
       });
       if (payload?.method === 'initialize' || payload?.method === 'tools/call') {
         log('mcp_request', {
@@ -1341,6 +1416,13 @@ timer.unref();
 const bridgeTimer = setInterval(() => publishReadyBridgeDeliveries().catch((error) => log('bridge_publish_failed', { message: error.message })), config.bridge.pollSeconds * 1000);
 bridgeTimer.unref();
 
+const holdTimer = setInterval(() => kickHoldWorker().catch((error) => log('ombre_hold_worker_failed', { message: error.message })), config.ombre.holdQueuePollSeconds * 1000);
+holdTimer.unref();
+void kickHoldWorker().catch((error) => log('ombre_hold_worker_failed', { message: error.message }));
+
 for (const signal of ['SIGINT', 'SIGTERM']) {
-  process.on(signal, () => server.close(() => process.exit(0)));
+  process.on(signal, () => {
+    clearInterval(holdTimer);
+    server.close(() => process.exit(0));
+  });
 }

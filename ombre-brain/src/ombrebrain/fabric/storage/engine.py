@@ -27,16 +27,3 @@ class MemoryFabric:
     def events_by_type(self, memory_type: MemoryType) -> list[MemoryEvent]:
         expected_type = MemoryType(memory_type)
         return [event for event in self.replay_events() if event.memory_type == expected_type]
-
-    def purge_legacy_bucket(self, bucket_id: str) -> int:
-        """Remove persisted v3 events copied from one legacy bucket."""
-        expected = str(bucket_id)
-
-        def belongs_to_bucket(payload: dict[str, object]) -> bool:
-            metadata = payload.get("metadata")
-            return (
-                isinstance(metadata, dict)
-                and str(metadata.get("legacy_bucket_id") or "") == expected
-            )
-
-        return self.wal.rewrite_excluding(belongs_to_bucket)

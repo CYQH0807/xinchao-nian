@@ -41,7 +41,10 @@ export class OmbreClient {
             clientInfo: { name: 'xinchao-dynamic-mind', version: SYSTEM_VERSION },
           },
         });
-        if (!this.sessionId) throw new Error('Ombre MCP did not return a session id');
+        // Ombre v3.6.3 serves stateless JSON MCP and therefore may omit the
+        // session header; stateful MCP servers still keep working when they
+        // return one.  The request method already adds the header only when
+        // present, so both transports can share the same client.
         await this.post({ jsonrpc: '2.0', method: 'notifications/initialized' }, false);
       })().finally(() => { this.initializePromise = null; });
     }
@@ -59,6 +62,19 @@ export class OmbreClient {
       }
     }
     throw new Error('Ombre MCP call failed after session refresh');
+  }
+
+  // 后台 hold worker 专用：执行完整 Ombre hold，并把人类可读回执解析成 bucket id。
+  async hold(args = {}, timeoutMs = this.config.holdTimeoutMs ?? 120000) {
+    const raw = await this.call('hold', args, timeoutMs);
+    const payload = raw?.result ?? raw;
+    const text = extractText(raw);
+    if (payload?.isError || raw?.isError) {
+      throw new Error(text || 'ombre_hold_failed');
+    }
+    const ombreBucketId = parseHoldBucketId(text);
+    if (!ombreBucketId) throw new Error('ombre_hold_missing_bucket_id');
+    return { ombreBucketId, responseText: text };
   }
 
   // 网关用：拉 OB 的 tools/list（供心潮念合并暴露 OB 记忆工具）。
@@ -227,9 +243,10 @@ export class OmbreClient {
     if (!this.config.writeEnabled) throw new Error('ombre_write_disabled');
     const content = String(item?.content ?? '').trim();
     if (!content) throw new Error('pending_content_empty');
+    // Ombre v3.6.3 rejects legacy source/auto fields; grow only accepts its
+    // documented content/items/test_data contract.
     const result = await this.call('grow', {
       content,
-      source: 'xinchao-pending-hold',
     });
     const text = extractText(result);
     const bucketId = parseGrowBucketIds(text)[0] ?? null;
@@ -270,8 +287,6 @@ export class OmbreClient {
       content,
       tags: 'dream',
       importance: 7,
-      auto: true,
-      source: 'xinchao-dream',
     });
     const text = extractText(result);
     const bucketId = text.match(/[a-f0-9]{12,}/i)?.[0] ?? null;
@@ -364,6 +379,13 @@ export function parseGrowBucketIds(text) {
     }
   }
   return ids;
+}
+
+// hold 的普通、feel、pinned 分支都用“→bucket_id”回执；保留旧版纯十六进制回执兼容。
+export function parseHoldBucketId(text) {
+  return parseGrowBucketIds(text)[0]
+    ?? String(text ?? '').match(/(?:bucket[_ ]?id\s*[:=]\s*|\b)([a-f0-9]{12,160})\b/i)?.[1]
+    ?? null;
 }
 
 function parseMcp(text) {

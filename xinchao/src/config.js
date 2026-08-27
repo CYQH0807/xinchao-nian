@@ -19,6 +19,7 @@ export function loadConfig() {
     port: number('PORT', 18110, 1, 65535),
     serviceToken: process.env.SERVICE_TOKEN ?? '',
     statePath: process.env.STATE_PATH ?? '/app/state/state.json',
+    holdJobsPath: process.env.HOLD_JOBS_PATH ?? '/app/state/hold-jobs.json',
     personalityPath: process.env.PERSONALITY_PATH ?? '/app/state/personality.json',
     personality: {
       // Optional presentation metadata only. Scores and reasons still come
@@ -50,7 +51,9 @@ export function loadConfig() {
       readEnabled: bool('OMBRE_READ_ENABLED', false),
       writeEnabled: bool('OMBRE_WRITE_ENABLED', false),
       breathMaxResults: number('OMBRE_BREATH_MAX_RESULTS', 3, 1, 10),
-      breathMaxTokens: number('OMBRE_BREATH_MAX_TOKENS', 800, 200, 3000)
+      breathMaxTokens: number('OMBRE_BREATH_MAX_TOKENS', 800, 200, 3000),
+      holdTimeoutMs: number('OMBRE_HOLD_TIMEOUT_MS', 120000, 5000, 300000),
+      holdQueuePollSeconds: number('OMBRE_HOLD_QUEUE_POLL_SECONDS', 2, 1, 60),
     },
     context: {
       enabled: bool('CONTEXT_ENVELOPE_ENABLED', true),

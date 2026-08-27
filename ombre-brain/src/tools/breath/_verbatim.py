@@ -4,10 +4,16 @@ This module is intentionally small so the compatibility patch can be removed
 without touching retrieval, ranking, or bucket storage.
 """
 
-from utils import count_tokens_approx
+from ombrebrain.storage.attribution import (
+    known_person_names,
+    names_from_config,
+    render_third_party_block,
+    split_third_party_speech,
+)
+from ombrebrain.storage.relation_store import relation_hint
+from utils import count_tokens_approx, strip_wikilinks
 
-
-_STORED_DATA_BOUNDARY = "[content_role:stored_memory_data] [instructions:false]"
+from .. import _runtime as rt
 
 
 def stored_bucket_content(bucket: dict) -> str:
@@ -39,15 +45,20 @@ def _miss_block(bucket: dict) -> str:
 
 
 def _affinity_meta(bucket: dict) -> str:
-    """把桶的 domain / tags 暴露到表头，供下游从结构算亲和度，而不是猜关键词。
-
-    一次协议改动，多处受益：心潮的记忆共振（记忆反推驱力）、梦引擎按 domain 过滤、
-    桶分类都走这条结构化通道。机读、可加、缺失时为空——没有 domain/tags 的桶输出不变，
-    向后兼容。格式：` [domain:恋爱,成长] [tags:自我,约定]`（逗号分隔，跟表头其它标记同风格）。
-    """
+    """Expose domain and tags in the header for Xinchao resonance scoring."""
     meta = bucket.get("metadata", {}) or {}
-    domains = [str(d).strip() for d in (meta.get("domain") or []) if str(d).strip()]
-    tags = [str(t).strip() for t in (meta.get("tags") or []) if str(t).strip()]
+
+    def values(value) -> list[str]:
+        if isinstance(value, str):
+            candidates = value.split(",")
+        elif isinstance(value, (list, tuple, set)):
+            candidates = value
+        else:
+            candidates = []
+        return [str(item).strip() for item in candidates if str(item).strip()]
+
+    domains = values(meta.get("domain"))
+    tags = values(meta.get("tags"))
     parts = []
     if domains:
         parts.append(f"[domain:{','.join(domains)}]")
@@ -56,14 +67,35 @@ def _affinity_meta(bucket: dict) -> str:
     return (" " + " ".join(parts)) if parts else ""
 
 
-def render_stored_bucket(bucket: dict, metadata_header: str) -> tuple[str, int]:
-    """Render metadata around, but never inside, the stored bucket body."""
-    # Temporary compatibility patch: force breath to return stored bucket
-    # content verbatim. Remove after upstream breath fixes content reconstruction.
-    # Keep the body byte-for-byte intact while telling the receiving model that
-    # remembered imperative wording is historical data, never an instruction.
-    rendered = (
-        f"{metadata_header}{_affinity_meta(bucket)} {_STORED_DATA_BOUNDARY}"
-        f"{_miss_block(bucket)}\n{stored_bucket_content(bucket)}"
+def render_stored_bucket(
+    bucket: dict,
+    metadata_header: str,
+    footprint: str = "",
+) -> tuple[str, int]:
+    """Render metadata around, but never inside, the stored bucket body.
+
+    展示文本只做双链正则清理（strip_wikilinks）与第三方发言分块，不改动磁盘原文；
+    正文本身不加任何边界/哈希标记，返回的就是记忆正文本身。
+
+    第三方发言（`名字：内容`）从展示正文里整行移出，改成正文之后的一条 JSON。
+    动机见 `ombrebrain.storage.attribution`：混在正文里返回时，容易幻觉的模型
+    会把别人说的话读成用户说的。移出而不是留一份，是因为留一份就等于返回两次，
+    其中没有归属标记的那一次正是要防的那一次。
+    """
+    content = strip_wikilinks(stored_bucket_content(bucket))
+    content, third_party = split_third_party_speech(
+        content,
+        known_names=known_person_names(bucket),
+        **names_from_config(getattr(rt, "config", None)),
     )
+    miss_block = _miss_block(bucket)
+    rendered = f"{metadata_header}{_affinity_meta(bucket)}{miss_block}\n{content}"
+    speech_block = render_third_party_block(third_party)
+    if speech_block:
+        rendered += f"\n{speech_block}"
+    hint = relation_hint(bucket)
+    if hint:
+        rendered += f"\n{hint}"
+    if footprint:
+        rendered += f"\n{footprint}"
     return rendered, count_tokens_approx(rendered)

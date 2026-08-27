@@ -1,7 +1,13 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { materialWithRefs, parseMemoryMapText, parseMemoryPreviewText, parseSurfacedBucketIds } from '../src/ombre-client.js';
+import {
+  materialWithRefs,
+  OmbreClient,
+  parseMemoryMapText,
+  parseMemoryPreviewText,
+  parseSurfacedBucketIds,
+} from '../src/ombre-client.js';
 
 test('breath metadata exposes source bucket ids without guessing from body text', () => {
   const text = `
@@ -78,4 +84,67 @@ test('bucket preview refuses a mismatched bucket id', () => {
   assert.equal(result.available, false);
   assert.equal(result.reason, 'id_mismatch');
   assert.equal(result.preview, '');
+});
+
+test('client accepts stateless Ombre MCP initialization', async (t) => {
+  const originalFetch = globalThis.fetch;
+  const methods = [];
+  globalThis.fetch = async (_url, options) => {
+    const payload = JSON.parse(options.body);
+    methods.push(payload.method);
+    const body = payload.method === 'tools/list'
+      ? JSON.stringify({ jsonrpc: '2.0', id: payload.id, result: { tools: [] } })
+      : '';
+    return {
+      ok: true,
+      headers: { get: () => null },
+      text: async () => body,
+    };
+  };
+  t.after(() => { globalThis.fetch = originalFetch; });
+
+  const client = new OmbreClient({ url: 'http://ombre.test/mcp' });
+  assert.deepEqual(await client.listTools(), []);
+  assert.deepEqual(methods, ['initialize', 'notifications/initialized', 'tools/list']);
+});
+
+test('write adapters send only the Ombre v3.6.3 arguments', async () => {
+  const client = new OmbreClient({ writeEnabled: true });
+  const calls = [];
+  client.call = async (name, args) => {
+    calls.push([name, args]);
+    if (name === 'grow') {
+      return { result: { content: [{ type: 'text', text: '已整理 → growbucket123' }] } };
+    }
+    if (name === 'hold') {
+      return { result: { content: [{ type: 'text', text: '已沉淀 abcdef123456' }] } };
+    }
+    return { result: { content: [{ type: 'text', text: 'ok' }] } };
+  };
+
+  assert.equal(await client.storeHeldOutput({ content: '一段待留下的整理内容' }), 'growbucket123');
+  assert.equal(await client.storeDream({ dream: '梦', residue: '余韵', awareness: '醒后' }), 'abcdef123456');
+  assert.deepEqual(calls[0], ['grow', { content: '一段待留下的整理内容' }]);
+  assert.deepEqual(calls[1][0], 'hold');
+  assert.deepEqual(calls[1][1], {
+    content: '梦境：梦\n梦境余韵：余韵\n醒后意识：醒后\n说明：这是睡眠结算产生的梦境，不是现实事件；调用外部记忆服务不等于醒来。',
+    tags: 'dream',
+    importance: 7,
+  });
+  assert.deepEqual(calls[2], ['trace', { bucket_id: 'abcdef123456', dont_surface: 1 }]);
+});
+
+test('background hold adapter returns the bucket id from the Ombre acknowledgement', async () => {
+  const client = new OmbreClient({ writeEnabled: true, holdTimeoutMs: 120000 });
+  const calls = [];
+  client.call = async (name, args, timeoutMs) => {
+    calls.push([name, args, timeoutMs]);
+    return { result: { content: [{ type: 'text', text: '新建→holdbucket123 恋爱' }] } };
+  };
+
+  assert.deepEqual(await client.hold({ content: '后台保存' }), {
+    ombreBucketId: 'holdbucket123',
+    responseText: '新建→holdbucket123 恋爱',
+  });
+  assert.deepEqual(calls, [['hold', { content: '后台保存' }, 120000]]);
 });

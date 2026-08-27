@@ -12,27 +12,91 @@ web/buckets.py — 记忆桶管理 + 设置 + 锚点 + 自我认知读取
 """
 
 import hmac
+import math
 import os
 import re
-import yaml
+import threading
+import unicodedata
+from contextlib import AsyncExitStack
 
 from starlette.requests import Request
 from starlette.responses import Response
 
-from memory_messages import resolved_hint
+from ombrebrain.domain.memory_messages import resolved_hint
 from . import _shared as sh
 
 logger = sh.logger
 
 try:
-    from utils import strip_wikilinks, parse_bool  # type: ignore
+    from utils import (  # type: ignore
+        atomic_update_config_yaml,
+        parse_bool,
+        parse_iso_datetime,
+        strip_wikilinks,
+    )
 except ImportError:  # pragma: no cover
-    from ..utils import strip_wikilinks, parse_bool  # type: ignore
+    from ..utils import (  # type: ignore
+        atomic_update_config_yaml,
+        parse_bool,
+        parse_iso_datetime,
+        strip_wikilinks,
+    )
 
 try:
-    from tools._common import check_pinned_quota as _check_pinned_quota  # type: ignore
+    from tools._common import (  # type: ignore
+        _quota_turn,
+        check_pinned_quota as _check_pinned_quota,
+        is_terminal_memory_metadata as _is_terminal_memory_metadata,
+    )
 except ImportError:  # pragma: no cover
-    from ..tools._common import check_pinned_quota as _check_pinned_quota  # type: ignore
+    from ..tools._common import (  # type: ignore
+        _quota_turn,
+        check_pinned_quota as _check_pinned_quota,
+        is_terminal_memory_metadata as _is_terminal_memory_metadata,
+    )
+
+try:
+    from tools.plan.core import (  # type: ignore
+        is_letter_bucket,
+        letter_lock_state,
+        safe_letter_metadata,
+    )
+except ImportError:  # pragma: no cover
+    from ..tools.plan.core import (  # type: ignore
+        is_letter_bucket,
+        letter_lock_state,
+        safe_letter_metadata,
+    )
+
+
+_LOCKED_LETTER_NAME = "一封上锁的信"
+_LOCKED_LETTER_NOTICE = "这封信尚未向你开放。"
+_SIDECAR_BUCKET_ID_RE = re.compile(r"[A-Za-z0-9._-]{1,160}\Z")
+
+
+def _require_sidecar_auth(request: Request) -> Response | None:
+    """Require the dedicated long-lived token used by the local sidecar."""
+    from starlette.responses import JSONResponse
+
+    configured = os.environ.get("OMBRE_MCP_SERVICE_TOKEN", "").strip()
+    authorization = request.headers.get("Authorization", "")
+    supplied = authorization[7:].strip() if authorization.startswith("Bearer ") else ""
+    valid = (
+        len(configured) >= 32
+        and len(supplied) == len(configured)
+        and hmac.compare_digest(supplied, configured)
+    )
+    if not valid:
+        return JSONResponse({"error": "Unauthorized"}, status_code=401)
+    return None
+
+
+def _datetime_epoch_ms(value) -> int | None:
+    """Return one server-normalized instant for Dashboard sorting/display."""
+    try:
+        return round(parse_iso_datetime(value).timestamp() * 1000)
+    except (OSError, OverflowError, TypeError, ValueError):
+        return None
 
 
 async def rename_human_in_buckets(old: str, new: str) -> dict:
@@ -42,134 +106,88 @@ async def rename_human_in_buckets(old: str, new: str) -> dict:
     用途：她/他改了称呼后，改名前就存在的老桶仍写着旧词（默认「用户」），breath 里
     新桶显示新名、老桶还是旧名，看起来"批量替换没生效"。这里一次性补齐。
 
-    刻意**直接改 frontmatter，不走 bucket_mgr.update**：update 会把 last_active 刷成现在，
-    改个称呼不该让全部记忆显得"刚刚动过"、扰乱衰减与浮现排序。content 改了的桶顺手重算
-    embedding（best-effort，无 key/standby 时静默跳过）。
+    每个桶都走 BucketManager 的正常事务边界，但不刷新 ``last_active``；
+    content 改变时派生索引也会按普通更新流程重建。
 
     返回 {buckets_changed, replacements}。old 为空 / old==new 时直接 no-op。"""
-    import frontmatter as _fm
-
-    if not old or not new or old == new:
-        return {"buckets_changed": 0, "replacements": 0}
-
-    pat = re.compile(re.escape(old))
-    bm = sh.bucket_mgr
-    dirs = list(bm._active_dirs) + [bm.archive_dir]
-    changed, total = 0, 0
-
-    for _root, _fname, fpath in bm._iter_md_files(dirs):
-        try:
-            post = _fm.load(fpath)
-        except Exception:
-            continue
-        n = 0
-        content_changed = False
-        new_content, c = pat.subn(new, post.content or "")
-        if c:
-            post.content = new_content
-            n += c
-            content_changed = True
-        for field in ("name", "why_remembered", "user_name"):
-            v = post.get(field)
-            if isinstance(v, str) and v:
-                nv, c2 = pat.subn(new, v)
-                if c2:
-                    post[field] = nv
-                    n += c2
-        if not n:
-            continue
-        try:
-            with open(fpath, "w", encoding="utf-8") as f:
-                f.write(_fm.dumps(post))
-        except OSError as e:
-            logger.warning(f"rename_human write failed {fpath}: {e}")
-            continue
-        changed += 1
-        total += n
-        if content_changed:
-            bid = post.get("id")
-            ee = sh.embedding_engine
-            if bid and ee and getattr(ee, "enabled", False):
-                try:
-                    await ee.generate_and_store(bid, post.content or "")
-                except Exception:
-                    pass
-
-    try:
-        bm._invalidate_bm25()
-    except Exception:
-        pass
-    logger.info(f"rename_human_in_buckets: '{old}'->'{new}' changed={changed} replacements={total}")
-    return {"buckets_changed": changed, "replacements": total}
+    result = await sh.bucket_mgr.replace_text_fields(old, new)
+    logger.info(
+        "rename_human_in_buckets: %r->%r changed=%s replacements=%s",
+        old,
+        new,
+        result["buckets_changed"],
+        result["replacements"],
+    )
+    return result
 
 
 def register(mcp) -> None:
+    # 每次路由注册使用一个原生提交锁，不与 asyncio 事件循环绑定；临界区内
+    # 不执行 await，因此既能跨测试事件循环串行化，也不会因持锁等待而死锁。
+    sampling_commit_lock = threading.Lock()
 
     @mcp.custom_route("/api/bucket-preview/{bucket_id}", methods=["GET"])
     async def api_bucket_preview(request: Request) -> Response:
-        """Trusted-sidecar-only short preview for the owner's memory map.
-
-        This route deliberately does not accept the dashboard cookie and never
-        returns more than seven non-empty lines.  The full dashboard detail
-        route below keeps its original, stricter browser-session boundary.
-        """
+        """Return at most seven non-empty lines for the local memory map."""
         from starlette.responses import JSONResponse
-        configured = os.environ.get("OMBRE_MCP_SERVICE_TOKEN", "").strip()
-        auth = request.headers.get("Authorization", "")
-        supplied = auth[7:].strip() if auth.startswith("Bearer ") else ""
-        if len(configured) < 32 or len(supplied) != len(configured) or not hmac.compare_digest(supplied, configured):
-            return JSONResponse({"error": "Unauthorized"}, status_code=401)
+
+        err = _require_sidecar_auth(request)
+        if err:
+            return err
         bucket_id = str(request.path_params.get("bucket_id", "")).strip()
-        if not re.fullmatch(r"[A-Za-z0-9._-]{1,160}", bucket_id):
+        if not _SIDECAR_BUCKET_ID_RE.fullmatch(bucket_id):
             return JSONResponse({"error": "invalid id"}, status_code=400)
-        bucket = await sh.bucket_mgr.get(bucket_id)
-        if not bucket or (bucket.get("metadata") or {}).get("deleted_at"):
-            return JSONResponse({"error": "not found"}, status_code=404)
-        source = strip_wikilinks(str(bucket.get("content") or ""))
-        all_lines = [line.strip() for line in source.splitlines() if line.strip()]
-        lines = all_lines[:7]
-        return JSONResponse({
-            "id": str(bucket.get("id") or bucket_id),
-            "preview": "\n".join(lines)[:1400],
-            "lineCount": len(lines),
-            "truncated": len(all_lines) > len(lines),
-        })
+        try:
+            bucket = await sh.bucket_mgr.get(bucket_id)
+            if not bucket or (bucket.get("metadata") or {}).get("deleted_at"):
+                return JSONResponse({"error": "not found"}, status_code=404)
+            source = strip_wikilinks(str(bucket.get("content") or ""))
+            all_lines = [line.strip() for line in source.splitlines() if line.strip()]
+            lines = all_lines[:7]
+            return JSONResponse({
+                "id": str(bucket.get("id") or bucket_id),
+                "preview": "\n".join(lines)[:1400],
+                "lineCount": len(lines),
+                "truncated": len(all_lines) > len(lines),
+            })
+        except Exception:
+            logger.exception("sidecar bucket preview failed")
+            return JSONResponse({"error": "internal error"}, status_code=500)
 
     @mcp.custom_route("/api/bucket-map", methods=["GET"])
     async def api_bucket_map(request: Request) -> Response:
-        """Trusted-sidecar-only structured star map for the owner's memory map.
-
-        Same Bearer-token boundary as /api/bucket-preview above: this is for the
-        dynamic-mind sidecar, not browsers.  Metadata only — no content preview,
-        no why_remembered — so the payload stays light and privacy-clean.
-        (pulse returns a human-readable digest, not a per-bucket table; the
-        sidecar needs structured rows to draw the constellation.)
-        """
+        """Return metadata-only star rows for the local sidecar memory map."""
         from starlette.responses import JSONResponse
-        configured = os.environ.get("OMBRE_MCP_SERVICE_TOKEN", "").strip()
-        auth = request.headers.get("Authorization", "")
-        supplied = auth[7:].strip() if auth.startswith("Bearer ") else ""
-        if len(configured) < 32 or len(supplied) != len(configured) or not hmac.compare_digest(supplied, configured):
-            return JSONResponse({"error": "Unauthorized"}, status_code=401)
+
+        err = _require_sidecar_auth(request)
+        if err:
+            return err
         try:
             all_buckets = await sh.bucket_mgr.list_all(include_archive=True)
             stars = []
             stats = {"pinned": 0, "dynamic": 0, "archived": 0}
-            for b in all_buckets:
-                meta = b.get("metadata", {})
+            for bucket in all_buckets:
+                meta = bucket.get("metadata", {}) or {}
                 if meta.get("deleted_at"):
                     continue
-                btype = meta.get("type", "dynamic")
-                if meta.get("pinned") or btype == "permanent":
+                bucket_id = str(bucket.get("id") or "").strip()
+                if not bucket_id:
+                    continue
+                bucket_type = meta.get("type", "dynamic")
+                if meta.get("pinned") or bucket_type == "permanent":
                     stats["pinned"] += 1
-                elif btype == "archive":
+                elif bucket_type == "archive":
                     stats["archived"] += 1
                 else:
                     stats["dynamic"] += 1
+                try:
+                    score = float(sh.decay_engine.calculate_score(meta))
+                except (AttributeError, TypeError, ValueError):
+                    score = 0.0
                 stars.append({
-                    "id": b["id"],
-                    "name": meta.get("name", b["id"]),
-                    "type": btype,
+                    "id": bucket_id,
+                    "name": meta.get("name", bucket_id),
+                    "type": bucket_type,
                     "domain": meta.get("domain", []),
                     "tags": meta.get("tags", []),
                     "valence": meta.get("valence", 0.5),
@@ -180,33 +198,64 @@ def register(mcp) -> None:
                     "created_at": meta.get("created", ""),
                     "last_active": meta.get("last_active", ""),
                     "activation_count": meta.get("activation_count", 0),
-                    "score": sh.decay_engine.calculate_score(meta),
+                    "score": score,
                 })
-            stars.sort(key=lambda x: x["score"], reverse=True)
-            return JSONResponse({"stats": stats, "total": len(stars), "stars": stars[:800]})
-        except Exception as e:
-            return JSONResponse({"error": str(e)}, status_code=500)
+            stars.sort(key=lambda item: (-item["score"], item["id"]))
+            return JSONResponse({
+                "stats": stats,
+                "total": len(stars),
+                "stars": stars[:800],
+            })
+        except Exception:
+            logger.exception("sidecar bucket map failed")
+            return JSONResponse({"error": "internal error"}, status_code=500)
 
     @mcp.custom_route("/api/buckets", methods=["GET"])
     async def api_buckets(request: Request) -> Response:
-        """List all buckets with metadata (no content for efficiency)."""
+        """List buckets, optionally ordered by their first-recorded time."""
         from starlette.responses import JSONResponse
         err = sh._require_auth(request)
         if err:
             return err
+        sort_mode = str(request.query_params.get("sort", "score") or "score").strip()
+        allowed_sort_modes = {"score", "created_desc", "created_asc"}
+        if sort_mode not in allowed_sort_modes:
+            return JSONResponse(
+                {
+                    "error": "invalid sort mode",
+                    "allowed": sorted(allowed_sort_modes),
+                },
+                status_code=400,
+            )
         try:
             all_buckets = await sh.bucket_mgr.list_all(include_archive=True)
+            deletion_statuses = (
+                sh.deletion_requests.status_snapshot()
+                if sh.deletion_requests is not None else {}
+            )
             result = []
             for b in all_buckets:
                 meta = b.get("metadata", {})
                 if meta.get("deleted_at"):
                     continue
+                lock_state = letter_lock_state(b, "human")
+                letter_locked = bool(lock_state["locked"])
+                created_epoch_ms = _datetime_epoch_ms(meta.get("created"))
+                last_active_epoch_ms = _datetime_epoch_ms(meta.get("last_active"))
                 result.append({
                     "id": b["id"],
-                    "name": meta.get("name", b["id"]),
+                    "name": (
+                        _LOCKED_LETTER_NAME
+                        if letter_locked
+                        else meta.get("name", b["id"])
+                    ),
                     "type": meta.get("type", "dynamic"),
-                    "domain": meta.get("domain", []),
-                    "tags": meta.get("tags", []),
+                    "domain": (
+                        ["letter"] if letter_locked else meta.get("domain", [])
+                    ),
+                    "tags": (
+                        ["__letter__"] if letter_locked else meta.get("tags", [])
+                    ),
                     "valence": meta.get("valence", 0.5),
                     "arousal": meta.get("arousal", 0.3),
                     "model_valence": meta.get("model_valence"),
@@ -214,19 +263,59 @@ def register(mcp) -> None:
                     "resolved": meta.get("resolved", False),
                     "pinned": meta.get("pinned", False),
                     "digested": meta.get("digested", False),
+                    "imported": parse_bool(meta.get("imported"), default=False)
+                    or str(meta.get("source_tool") or "").strip() == "import",
                     "created": meta.get("created", ""),
+                    "created_epoch_ms": created_epoch_ms,
                     "last_active": meta.get("last_active", ""),
+                    "last_active_epoch_ms": last_active_epoch_ms,
                     "activation_count": meta.get("activation_count", 0),
                     "score": sh.decay_engine.calculate_score(meta),
-                    "content_preview": strip_wikilinks(b.get("content", ""))[:200],
+                    "content_preview": (
+                        _LOCKED_LETTER_NOTICE
+                        if letter_locked
+                        else strip_wikilinks(b.get("content", ""))[:200]
+                    ),
+                    "letter_locked": letter_locked,
+                    "lock_type": lock_state["lock_type"],
+                    "unlock_date": lock_state["unlock_date"],
                     # iter 1.8 新增字段（后台老桶读出默认值）
-                    "why_remembered": meta.get("why_remembered", ""),
+                    "why_remembered": (
+                        "" if letter_locked else meta.get("why_remembered", "")
+                    ),
                     "dont_surface": bool(meta.get("dont_surface", False)),
                     "first_of_kind": bool(meta.get("first_of_kind", False)),
                     "weight": meta.get("weight"),  # plan 专有，非 plan 为 None
-                    "triggered_by": meta.get("triggered_by", ""),
+                    "triggered_by": (
+                        "" if letter_locked else meta.get("triggered_by", "")
+                    ),
+                    "erasable_test_data": bool(
+                        isinstance(meta.get("provenance"), dict)
+                        and meta["provenance"].get("kind") == "test"
+                        and meta["provenance"].get("erasable") is True
+                    ),
+                    "deletion_request": (
+                        deletion_statuses.get(str(b["id"]))
+                    ),
                 })
-            result.sort(key=lambda x: x["score"], reverse=True)
+            if sort_mode == "score":
+                # Preserve the long-standing Dashboard default while making
+                # equal-score ordering deterministic across os.walk refreshes.
+                result.sort(key=lambda item: (-float(item["score"]), str(item["id"])))
+            else:
+                descending = sort_mode == "created_desc"
+
+                def created_sort_key(item: dict) -> tuple[int, int, str]:
+                    timestamp = item["created_epoch_ms"]
+                    if timestamp is None:
+                        # Legacy/hand-written buckets can lack a valid created
+                        # value. Unknown times always stay at the end, not at
+                        # an arbitrary extreme of either chronological view.
+                        return (1, 0, str(item["id"]))
+                    ordered_timestamp = -timestamp if descending else timestamp
+                    return (0, ordered_timestamp, str(item["id"]))
+
+                result.sort(key=created_sort_key)
             return JSONResponse(result)
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=500)
@@ -234,7 +323,7 @@ def register(mcp) -> None:
 
     @mcp.custom_route("/api/bucket/{bucket_id}", methods=["GET"])
     async def api_bucket_detail(request: Request) -> Response:
-        """Get full bucket content by ID."""
+        """Get full raw bucket content plus display-only derived text by ID."""
         from starlette.responses import JSONResponse
         err = sh._require_auth(request)
         if err:
@@ -244,18 +333,52 @@ def register(mcp) -> None:
         if not bucket:
             return JSONResponse({"error": "not found"}, status_code=404)
         meta = bucket.get("metadata", {})
+        lock_state = letter_lock_state(bucket, "human")
+        if lock_state["locked"]:
+            safe_letter = safe_letter_metadata(bucket, "human")
+            return JSONResponse({
+                "id": bucket["id"],
+                "metadata": {
+                    "name": _LOCKED_LETTER_NAME,
+                    "type": meta.get("type", "letter"),
+                    "domain": ["letter"],
+                    "author": safe_letter["author"],
+                    "user_name": safe_letter["user_name"],
+                    "writer_name": safe_letter["writer_name"],
+                    "letter_date": safe_letter["date"],
+                    "created": safe_letter["created"],
+                    "lock_type": safe_letter["lock_type"],
+                    "unlock_date": safe_letter["unlock_date"],
+                    "locked": True,
+                },
+                "content": "",
+                "display_content": _LOCKED_LETTER_NOTICE,
+                "score": sh.decay_engine.calculate_score(meta),
+                "triggered_feels": [],
+                "letter_locked": True,
+            })
         # iter 1.9 D / iter 2.0 §10 U-04: 反向链——只扫 feel_dir，O(feel桶数) 而非全库扫描
         triggered_feels = []
         try:
             triggered_feels = await sh.bucket_mgr.get_triggered_feels(bucket_id)
         except Exception as e:
             logger.warning(f"triggered_feels lookup failed / 反向链查询失败: {e}")
+        raw_content = bucket.get("content", "")
         return JSONResponse({
             "id": bucket["id"],
             "metadata": meta,
-            "content": strip_wikilinks(bucket.get("content", "")),
+            # Editing must round-trip the exact stored Markdown.  Keep the
+            # bracket-free presentation text separate so a metadata-only edit
+            # can never write a stripped [[wikilink]] body back to disk.
+            "content": raw_content,
+            "display_content": strip_wikilinks(raw_content),
             "score": sh.decay_engine.calculate_score(meta),
             "triggered_feels": triggered_feels,  # iter 1.9 D
+            "letter_locked": False,
+            "deletion_request": (
+                sh.deletion_requests.status(str(bucket["id"]))
+                if sh.deletion_requests is not None else None
+            ),
         })
 
 
@@ -269,25 +392,165 @@ def register(mcp) -> None:
         if err:
             return err
         bucket_id = request.path_params["bucket_id"]
-        bucket = await sh.bucket_mgr.get(bucket_id)
-        if not bucket:
-            return JSONResponse({"error": "not found"}, status_code=404)
-        meta = bucket["metadata"]
-        new_pinned = not bool(meta.get("pinned", False))
-        update_kwargs: dict[str, object] = {"pinned": new_pinned}
-        # Pinning: importance jumps to 10 + type→permanent. Unpin reverts type→dynamic.
-        if new_pinned:
-            quota_err = await _check_pinned_quota()
-            if quota_err:
-                return JSONResponse({"error": quota_err}, status_code=400)
-            update_kwargs["importance"] = 10
-            update_kwargs["type"] = "permanent"
-        else:
-            if meta.get("type") == "permanent":
-                update_kwargs["type"] = "dynamic"
         try:
-            await sh.bucket_mgr.update(bucket_id, **update_kwargs)
-            return JSONResponse({"ok": True, "pinned": new_pinned})
+            # Both pin and unpin share the pinned turn.  Otherwise an unpin can
+            # race a new pin and make the latter reject against a stale count;
+            # more importantly, two new pins could both pass the same precheck.
+            async with AsyncExitStack() as quota_stack:
+                await quota_stack.enter_async_context(_quota_turn("pinned"))
+
+                bucket = await sh.bucket_mgr.get(bucket_id)
+                if not bucket:
+                    return JSONResponse({"error": "not found"}, status_code=404)
+                meta = bucket.get("metadata", {})
+                if is_letter_bucket(bucket):
+                    return JSONResponse(
+                        {"error": "letters cannot be pinned from the bucket API"},
+                        status_code=403,
+                    )
+                if _is_terminal_memory_metadata(meta):
+                    return JSONResponse(
+                        {"error": "archived buckets cannot be pinned or unpinned"},
+                        status_code=409,
+                    )
+                current_pinned = parse_bool(meta.get("pinned"), default=False)
+                new_pinned = not current_pinned
+                protected = parse_bool(meta.get("protected"), default=False)
+                if protected and new_pinned:
+                    return JSONResponse(
+                        {
+                            "error": "protected 与 pinned 互斥；请先解除保护",
+                            "conflict": "pinned_protected_mutually_exclusive",
+                        },
+                        status_code=409,
+                    )
+                update_kwargs: dict[str, object] = {"pinned": new_pinned}
+                try:
+                    current_importance = int(meta.get("importance") or 0)
+                except (TypeError, ValueError):
+                    current_importance = 0
+                unpin_importance = current_importance
+                if current_pinned and not protected:
+                    try:
+                        body = await sh._read_json_object(request)
+                        raw_importance = body.get("importance")
+                        if isinstance(raw_importance, bool):
+                            raise ValueError("boolean is not an importance")
+                        unpin_importance = int(raw_importance)
+                        if (
+                            isinstance(raw_importance, float)
+                            and not raw_importance.is_integer()
+                        ):
+                            raise ValueError("fractional importance")
+                    except Exception:
+                        return JSONResponse(
+                            {
+                                "error": "unpin requires importance=1..10 in the same request",
+                                "field": "importance",
+                            },
+                            status_code=400,
+                        )
+                    if not 1 <= unpin_importance <= 10:
+                        return JSONResponse(
+                            {
+                                "error": "unpin requires importance=1..10 in the same request",
+                                "field": "importance",
+                            },
+                            status_code=400,
+                        )
+                    update_kwargs["importance"] = unpin_importance
+                current_type = str(
+                    meta.get("type") or "dynamic"
+                ).strip().lower()
+
+                locked_bucket = await sh.bucket_mgr.get(bucket_id)
+                if not locked_bucket:
+                    return JSONResponse({"error": "not found"}, status_code=404)
+                locked_meta = locked_bucket.get("metadata", {})
+                if not isinstance(locked_meta, dict):
+                    locked_meta = {}
+                if is_letter_bucket(locked_bucket):
+                    return JSONResponse(
+                        {"error": "letter state changed concurrently"},
+                        status_code=409,
+                    )
+                if _is_terminal_memory_metadata(locked_meta):
+                    return JSONResponse(
+                        {"error": "bucket was archived concurrently"},
+                        status_code=409,
+                    )
+                initial_quota_state = (
+                    current_pinned,
+                    protected,
+                    current_importance,
+                    current_type,
+                    parse_bool(meta.get("dont_surface"), default=False),
+                )
+                try:
+                    locked_importance = int(
+                        locked_meta.get("importance") or 0
+                    )
+                except (TypeError, ValueError):
+                    locked_importance = 0
+                locked_quota_state = (
+                    parse_bool(locked_meta.get("pinned"), default=False),
+                    parse_bool(locked_meta.get("protected"), default=False),
+                    locked_importance,
+                    str(locked_meta.get("type") or "dynamic").strip().lower(),
+                    parse_bool(
+                        locked_meta.get("dont_surface"), default=False
+                    ),
+                )
+                if locked_quota_state != initial_quota_state:
+                    return JSONResponse(
+                        {
+                            "error": "bucket changed concurrently; reload and retry",
+                            "conflict": "concurrent_change",
+                        },
+                        status_code=409,
+                    )
+
+                if new_pinned:
+                    quota_err = await _check_pinned_quota()
+                    if quota_err:
+                        return JSONResponse({"error": quota_err}, status_code=400)
+
+                ok = await sh.bucket_mgr.update(
+                    bucket_id,
+                    event_actor="human",
+                    **update_kwargs,
+                )
+                if not ok:
+                    latest = await sh.bucket_mgr.get(bucket_id)
+                    if _is_terminal_memory_metadata(
+                        (latest or {}).get("metadata", {})
+                    ):
+                        return JSONResponse(
+                            {"error": "bucket was archived concurrently"},
+                            status_code=409,
+                        )
+                    return JSONResponse({"error": "update failed"}, status_code=500)
+
+                persisted = await sh.bucket_mgr.get(bucket_id)
+                actual_pinned = parse_bool(
+                    (persisted or {}).get("metadata", {}).get("pinned"),
+                    default=False,
+                )
+                if not persisted or actual_pinned != new_pinned:
+                    return JSONResponse(
+                        {
+                            "error": "pin state was not persisted",
+                            "pinned": actual_pinned,
+                        },
+                        status_code=409,
+                    )
+                persisted_meta = persisted.get("metadata", {})
+                return JSONResponse({
+                    "ok": True,
+                    "pinned": actual_pinned,
+                    "importance": persisted_meta.get("importance"),
+                    "type": persisted_meta.get("type"),
+                })
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=500)
 
@@ -317,17 +580,31 @@ def register(mcp) -> None:
 
     @mcp.custom_route("/api/bucket/{bucket_id}/archive", methods=["POST"])
     async def api_bucket_archive(request: Request) -> Response:
-        """Move bucket to archive directory (soft delete)."""
+        """Submit the single human archive request for a formal bucket.
+
+        Human-facing archive intentionally uses the delete-to-archive terminal
+        action: after AI approval the Markdown is retained in ``archive/`` and
+        receives ``deleted_at``. The lower-level ``bucket_mgr.archive()`` path
+        remains available to AI/system lifecycle code and keeps its distinct
+        non-tombstone semantics.
+        """
         from starlette.responses import JSONResponse
         err = sh._require_auth(request)
         if err:
             return err
         bucket_id = request.path_params["bucket_id"]
         try:
-            ok = await sh.bucket_mgr.archive(bucket_id)
-            if not ok:
-                return JSONResponse({"error": "archive failed or bucket not found"}, status_code=404)
-            return JSONResponse({"ok": True, "archived": True})
+            try:
+                body = await sh._read_json_object(request)
+            except Exception:
+                body = {}
+            result = await sh.deletion_requests.submit(
+                bucket_id, body.get("reason", ""), action="delete"
+            )
+            if result.get("ok"):
+                return JSONResponse(result)
+            status = 404 if result.get("code") == "not_found" else 409 if result.get("code") in {"pending_exists", "daily_limit", "lifetime_limit"} else 400
+            return JSONResponse(result, status_code=status)
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=500)
 
@@ -345,12 +622,20 @@ def register(mcp) -> None:
         if err:
             return err
         bucket_id = request.path_params["bucket_id"]
-        bucket = await sh.bucket_mgr.get(bucket_id)
-        if not bucket:
-            return JSONResponse({"error": "not found"}, status_code=404)
-        new_val = not bool(bucket["metadata"].get("dont_surface", False))
         try:
-            await sh.bucket_mgr.update(bucket_id, dont_surface=new_val)
+            bucket = await sh.bucket_mgr.get(bucket_id)
+            if not bucket:
+                return JSONResponse({"error": "not found"}, status_code=404)
+            metadata = bucket.get("metadata", {})
+            if not isinstance(metadata, dict):
+                metadata = {}
+            current = parse_bool(
+                metadata.get("dont_surface"), default=False
+            )
+            new_val = not current
+            ok = await sh.bucket_mgr.update(bucket_id, dont_surface=new_val)
+            if not ok:
+                return JSONResponse({"error": "update failed"}, status_code=500)
             return JSONResponse({"ok": True, "dont_surface": new_val})
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=500)
@@ -384,24 +669,107 @@ def register(mcp) -> None:
         except ValueError as e:
             return JSONResponse({"error": str(e)}, status_code=400)
         ok_ids, missing_ids, errors = [], [], []
-        for bid in ids:
+        for bid in dict.fromkeys(ids):
             try:
                 b = await sh.bucket_mgr.get(bid)
                 if not b:
                     missing_ids.append(bid)
                     continue
-                await sh.bucket_mgr.update(bid, dont_surface=target)
-                ok_ids.append(bid)
+                ok = await sh.bucket_mgr.update(bid, dont_surface=target)
+                if ok:
+                    ok_ids.append(bid)
+                else:
+                    errors.append({"id": bid, "error": "update failed"})
             except Exception as e:
                 errors.append({"id": bid, "error": str(e)})
                 logger.warning(f"batch forget failed for {bid}: {e}")
-        return JSONResponse({
-            "ok": True,
+        payload = {
+            "ok": not errors,
             "dont_surface": target,
             "updated": ok_ids,
             "missing": missing_ids,
             "errors": errors,
-        })
+        }
+        return JSONResponse(payload)
+
+    @mcp.custom_route("/api/buckets/batch", methods=["POST"])
+    async def api_buckets_batch(request: Request) -> Response:
+        """Batch ordinary memory actions; never physically deletes files."""
+        from starlette.responses import JSONResponse
+        err = sh._require_auth(request)
+        if err:
+            return err
+        try:
+            body = await sh._read_json_object(request)
+        except Exception:
+            return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+        ids = body.get("ids") or []
+        action = str(body.get("action") or "")
+        if not isinstance(ids, list) or not ids or len(ids) > 500:
+            return JSONResponse({"error": "ids must contain 1-500 items"}, status_code=400)
+        if any(not isinstance(item, str) or not item or len(item) > 128 for item in ids):
+            return JSONResponse({"error": "invalid bucket id"}, status_code=400)
+        if action not in {"forget", "resolve", "archive"}:
+            return JSONResponse({"error": "unsupported batch action"}, status_code=400)
+        if action == "archive":
+            result = await sh.deletion_requests.submit_batch(
+                list(dict.fromkeys(ids)), body.get("reason", ""), action="delete"
+            )
+            status = 400 if result.get("code") == "reason_required" else 200
+            return JSONResponse({"action": action, **result}, status_code=status)
+        updated, missing, errors = [], [], []
+        for bucket_id in dict.fromkeys(ids):
+            try:
+                bucket = await sh.bucket_mgr.get(bucket_id)
+                if not bucket:
+                    missing.append(bucket_id)
+                    continue
+                if action == "forget":
+                    ok = await sh.bucket_mgr.update(bucket_id, dont_surface=True)
+                elif action == "resolve":
+                    ok = await sh.bucket_mgr.update(bucket_id, resolved=True)
+                if ok:
+                    updated.append(bucket_id)
+                else:
+                    errors.append({"id": bucket_id, "error": f"{action} failed"})
+            except Exception as exc:
+                errors.append({"id": bucket_id, "error": str(exc)})
+        return JSONResponse({"ok": not errors, "action": action,
+                             "updated": updated, "missing": missing, "errors": errors})
+
+    @mcp.custom_route("/api/developer/buckets/hard-delete", methods=["POST"])
+    async def api_developer_hard_delete(request: Request) -> Response:
+        """Erase explicitly erasable test buckets after a developer confirmation phrase."""
+        from starlette.responses import JSONResponse
+        err = sh._require_auth(request)
+        if err:
+            return err
+        try:
+            body = await sh._read_json_object(request)
+        except Exception:
+            return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+        ids = body.get("ids") or []
+        if body.get("confirm") != "DELETE TEST DATA":
+            return JSONResponse({"error": "confirmation phrase required"}, status_code=400)
+        if not isinstance(ids, list) or not ids or len(ids) > 100:
+            return JSONResponse({"error": "ids must contain 1-100 items"}, status_code=400)
+        deleted, refused, errors = [], [], []
+        for bucket_id in dict.fromkeys(ids):
+            if not isinstance(bucket_id, str) or not bucket_id or len(bucket_id) > 128:
+                errors.append({"id": str(bucket_id), "error": "invalid bucket id"})
+                continue
+            result = await sh.bucket_mgr.hard_delete_test_bucket(
+                bucket_id, reason=str(body.get("reason") or "developer cleanup")
+            )
+            if result.get("ok"):
+                deleted.append(bucket_id)
+            elif result.get("error") == "not_erasable_test_data":
+                refused.append(bucket_id)
+            else:
+                errors.append({"id": bucket_id, "error": result.get("error")})
+        status = 200 if deleted and not errors else (403 if refused and not deleted else 400)
+        return JSONResponse({"ok": bool(deleted) and not errors, "deleted": deleted,
+                             "refused": refused, "errors": errors}, status_code=status)
 
 
     # ---- iter 1.9 B: dashboard 调 sampling 配置 / sampling control ----
@@ -414,8 +782,12 @@ def register(mcp) -> None:
         err = sh._require_auth(request)
         if err:
             return err
-        surfacing = sh.config.setdefault("surfacing", {})
-        sampling = surfacing.setdefault("sampling", {})
+        surfacing = sh.config.get("surfacing")
+        if not isinstance(surfacing, dict):
+            surfacing = {}
+        sampling = surfacing.get("sampling")
+        if not isinstance(sampling, dict):
+            sampling = {}
         if request.method == "GET":
             return JSONResponse({
                 "enabled": parse_bool(sampling.get("enabled", False), default=False),
@@ -427,56 +799,105 @@ def register(mcp) -> None:
             body = await sh._read_json_object(request)
         except Exception:
             return JSONResponse({"error": "invalid JSON body"}, status_code=400)
-        # Validate ranges; reject silently-corrupt inputs at the boundary
-        try:
-            if "enabled" in body:
-                sampling["enabled"] = parse_bool(body["enabled"])
-            if "top_k" in body:
-                tk = int(body["top_k"])
-                if not (1 <= tk <= 50):
-                    return JSONResponse({"error": "top_k must be in [1,50]"}, status_code=400)
-                sampling["top_k"] = tk
-            if "sample_k" in body:
-                sk = int(body["sample_k"])
-                if not (1 <= sk <= 20):
-                    return JSONResponse({"error": "sample_k must be in [1,20]"}, status_code=400)
-                sampling["sample_k"] = sk
-            if "temperature" in body:
-                t = float(body["temperature"])
-                if not (0.1 <= t <= 5.0):
-                    return JSONResponse({"error": "temperature must be in [0.1,5.0]"}, status_code=400)
-                sampling["temperature"] = t
-        except (ValueError, TypeError) as e:
-            return JSONResponse({"error": f"invalid field type: {e}"}, status_code=400)
+        # JSON 读取已经结束，以下原生锁临界区内没有 await。锁覆盖候选快照、
+        # 落盘和运行态发布，防止并发更新丢字段或出现磁盘/运行态逆序。
+        with sampling_commit_lock:
+            live_surfacing = sh.config.get("surfacing")
+            if not isinstance(live_surfacing, dict):
+                live_surfacing = {}
+            live_sampling = live_surfacing.get("sampling")
+            if not isinstance(live_sampling, dict):
+                live_sampling = {}
 
-        # --- 写回 config.yaml（iter 2.0 §10 U-03 修复：重启后设置不丢失）---
-        try:
-            from utils import config_file_path
-            _cfg_path = config_file_path()
-            _disk: dict[str, object] = {}
-            if os.path.exists(_cfg_path):
-                with open(_cfg_path, "r", encoding="utf-8") as _f:
-                    _disk = yaml.safe_load(_f) or {}
-            _disk_sf = _disk.setdefault("surfacing", {})
-            if not isinstance(_disk_sf, dict):
-                _disk_sf = {}
-                _disk["surfacing"] = _disk_sf
-            _disk_samp = _disk_sf.setdefault("sampling", {})
-            if not isinstance(_disk_samp, dict):
-                _disk_samp = {}
-                _disk_sf["sampling"] = _disk_samp
-            _disk_samp.update({
-                "enabled": sampling.get("enabled", False),
-                "top_k": sampling.get("top_k", 5),
-                "sample_k": sampling.get("sample_k", 2),
-                "temperature": sampling.get("temperature", 0.7),
-            })
-            with open(_cfg_path, "w", encoding="utf-8") as _f:
-                yaml.dump(_disk, _f, default_flow_style=False, allow_unicode=True)
-        except Exception as _e:
-            logger.warning(f"sampling persist failed: {_e}")  # 不阻断热更新响应
+            # 先在独立候选副本上完成全部校验。若逐字段发布，后续字段无效或
+            # config.yaml 写入失败时，运行态会残留一半新、一半旧的配置。
+            candidate = dict(live_sampling)
+            try:
+                if "enabled" in body:
+                    candidate["enabled"] = parse_bool(body["enabled"])
+                if "top_k" in body:
+                    if isinstance(body["top_k"], bool):
+                        raise ValueError("top_k must be an integer")
+                    tk = int(body["top_k"])
+                    if isinstance(body["top_k"], float) and body["top_k"] != tk:
+                        raise ValueError("top_k must be an integer")
+                    if not (1 <= tk <= 50):
+                        return JSONResponse(
+                            {"error": "top_k must be in [1,50]"}, status_code=400
+                        )
+                    candidate["top_k"] = tk
+                if "sample_k" in body:
+                    if isinstance(body["sample_k"], bool):
+                        raise ValueError("sample_k must be an integer")
+                    sk = int(body["sample_k"])
+                    if (
+                        isinstance(body["sample_k"], float)
+                        and body["sample_k"] != sk
+                    ):
+                        raise ValueError("sample_k must be an integer")
+                    if not (1 <= sk <= 20):
+                        return JSONResponse(
+                            {"error": "sample_k must be in [1,20]"},
+                            status_code=400,
+                        )
+                    candidate["sample_k"] = sk
+                if "temperature" in body:
+                    if isinstance(body["temperature"], bool):
+                        raise ValueError("temperature must be a number")
+                    temperature = float(body["temperature"])
+                    if not math.isfinite(temperature) or not (
+                        0.1 <= temperature <= 5.0
+                    ):
+                        return JSONResponse(
+                            {"error": "temperature must be in [0.1,5.0]"},
+                            status_code=400,
+                        )
+                    candidate["temperature"] = temperature
+            except (OverflowError, ValueError, TypeError) as e:
+                return JSONResponse(
+                    {"error": f"invalid field type: {e}"}, status_code=400
+                )
 
-        return JSONResponse({"ok": True, **sampling})
+            # 写回 config.yaml，保证重启后设置不丢失。
+            def _mutate_sampling(save_config: dict) -> None:
+                sf = save_config.setdefault("surfacing", {})
+                if not isinstance(sf, dict):
+                    sf = {}
+                    save_config["surfacing"] = sf
+                samp = sf.setdefault("sampling", {})
+                if not isinstance(samp, dict):
+                    samp = {}
+                    sf["sampling"] = samp
+                samp.update({
+                    "enabled": candidate.get("enabled", False),
+                    "top_k": candidate.get("top_k", 5),
+                    "sample_k": candidate.get("sample_k", 2),
+                    "temperature": candidate.get("temperature", 0.7),
+                })
+
+            try:
+                atomic_update_config_yaml(_mutate_sampling)
+            except Exception as e:
+                # 磁盘未落地就如实报错，不能让用户看到“已保存”。
+                return JSONResponse(
+                    {"error": f"采样设置写入磁盘失败，未保存：{e}"},
+                    status_code=500,
+                )
+
+            # 以磁盘写入成功为提交点；尽量保留原嵌套字典对象，因为浮现逻辑
+            # 可能持有这个对象的引用。
+            published_surfacing = sh.config.get("surfacing")
+            if not isinstance(published_surfacing, dict):
+                published_surfacing = {}
+                sh.config["surfacing"] = published_surfacing
+            published_sampling = published_surfacing.get("sampling")
+            if not isinstance(published_sampling, dict):
+                published_sampling = {}
+                published_surfacing["sampling"] = published_sampling
+            published_sampling.clear()
+            published_sampling.update(candidate)
+
+            return JSONResponse({"ok": True, **published_sampling})
 
 
     # ---- iter 2.0: /api/settings/human — 读写通知称呼（human 宏）----
@@ -502,32 +923,42 @@ def register(mcp) -> None:
             human = "人类"
         if len(human) > 20:
             return JSONResponse({"error": "human name must be ≤ 20 characters"}, status_code=400)
-        # 旧称呼（默认「用户」，与 dehydrator / import 的兜底同源）—— 用于把老桶里的旧词换成新名。
-        old_human = (sh.config.get("human") or "用户").strip() or "用户"
-        sh.config["human"] = human
-        # 同步活的 dehydrator.human：否则改名后、重启前，新记忆仍按旧称呼脱水。
-        if getattr(sh, "dehydrator", None) is not None and hasattr(sh.dehydrator, "human"):
-            sh.dehydrator.human = human
-        # 写回 config.yaml
-        try:
-            from utils import config_file_path
-            _cfg_path = config_file_path()
-            _disk2: dict[str, object] = {}
-            if os.path.exists(_cfg_path):
-                with open(_cfg_path, "r", encoding="utf-8") as _f:
-                    _disk2 = yaml.safe_load(_f) or {}
-            _disk2["human"] = human
-            with open(_cfg_path, "w", encoding="utf-8") as _f:
-                yaml.dump(_disk2, _f, default_flow_style=False, allow_unicode=True)
-        except Exception as _e:
-            logger.warning(f"human name persist failed: {_e}")
-        # 改名时把老桶里残留的旧称呼一起换成新名（name/content/why_remembered/user_name）。
-        renamed = {"buckets_changed": 0, "replacements": 0}
-        if old_human and old_human != human:
+        if any(unicodedata.category(char).startswith("C") for char in human):
+            return JSONResponse(
+                {"error": "human name must not contain control characters"},
+                status_code=400,
+            )
+        # Config read/write, live runtime update and the full-vault replacement
+        # are one outer transaction.  Without it, concurrent A->B and B->C
+        # requests can interleave their per-bucket writes and leave mixed names.
+        async with sh.bucket_mgr.human_name_change_turn():
+            # 旧称呼（默认「用户」，与 dehydrator / import 的兜底同源）—— 用于把老桶里的旧词换成新名。
+            old_human = (sh.config.get("human") or "用户").strip() or "用户"
             try:
-                renamed = await rename_human_in_buckets(old_human, human)
-            except Exception as _re:
-                logger.warning(f"human rename batch failed: {_re}")
+                atomic_update_config_yaml(
+                    lambda save_config: save_config.__setitem__("human", human)
+                )
+            except Exception as e:
+                # Do not mutate live state unless persistence succeeded.
+                return JSONResponse(
+                    {"error": f"称呼写入磁盘失败，未保存：{e}"},
+                    status_code=500,
+                )
+
+            sh.config["human"] = human
+            # 同步活的 dehydrator.human：否则改名后、重启前，新记忆仍按旧称呼脱水。
+            if getattr(sh, "dehydrator", None) is not None and hasattr(
+                sh.dehydrator, "human"
+            ):
+                sh.dehydrator.human = human
+
+            # 改名时把老桶里残留的旧称呼一起换成新名（name/content/why_remembered/user_name）。
+            renamed = {"buckets_changed": 0, "replacements": 0}
+            if old_human and old_human != human:
+                try:
+                    renamed = await rename_human_in_buckets(old_human, human)
+                except Exception as _re:
+                    logger.warning(f"human rename batch failed: {_re}")
         return JSONResponse({"ok": True, "human": human, "renamed": renamed})
 
     # ---- 手动「同步旧记忆」：把指定旧称呼（默认「用户」）批量换成当前称呼 ----
@@ -548,19 +979,21 @@ def register(mcp) -> None:
         from_term = from_raw.strip()
         if len(from_term) > 100:
             return JSONResponse({"error": "from must be at most 100 characters"}, status_code=400)
-        cur = (sh.config.get("human") or "人类").strip() or "人类"
         if not from_term:
             return JSONResponse({"error": "缺少要替换的旧称呼"}, status_code=400)
-        if from_term == cur:
-            return JSONResponse({
-                "ok": True, "from": from_term, "to": cur,
-                "renamed": {"buckets_changed": 0, "replacements": 0},
-                "note": "要替换的词与当前称呼相同，无需处理",
-            })
-        try:
-            stats = await rename_human_in_buckets(from_term, cur)
-        except Exception as e:
-            return JSONResponse({"error": str(e)}, status_code=500)
+        async with sh.bucket_mgr.human_name_change_turn():
+            # Re-read inside the same reservation used by name-change requests.
+            cur = (sh.config.get("human") or "人类").strip() or "人类"
+            if from_term == cur:
+                return JSONResponse({
+                    "ok": True, "from": from_term, "to": cur,
+                    "renamed": {"buckets_changed": 0, "replacements": 0},
+                    "note": "要替换的词与当前称呼相同，无需处理",
+                })
+            try:
+                stats = await rename_human_in_buckets(from_term, cur)
+            except Exception as e:
+                return JSONResponse({"error": str(e)}, status_code=500)
         return JSONResponse({"ok": True, "from": from_term, "to": cur, "renamed": stats})
 
 
@@ -580,15 +1013,30 @@ def register(mcp) -> None:
         items = []
         for b in anchors:
             m = b.get("metadata", {})
+            lock_state = letter_lock_state(b, "human")
+            letter_locked = bool(lock_state["locked"])
             items.append({
                 "id": b["id"],
-                "name": m.get("name") or b["id"],
+                "name": (
+                    _LOCKED_LETTER_NAME
+                    if letter_locked
+                    else m.get("name") or b["id"]
+                ),
                 "created": m.get("created", ""),
-                "domain": m.get("domain", []),
-                "tags": m.get("tags", []),
+                "domain": (
+                    ["letter"] if letter_locked else m.get("domain", [])
+                ),
+                "tags": (
+                    ["__letter__"] if letter_locked else m.get("tags", [])
+                ),
                 "type": m.get("type", "dynamic"),
                 "pinned": bool(m.get("pinned", False)),
-                "preview": (b.get("content", "") or "")[:80],
+                "preview": (
+                    _LOCKED_LETTER_NOTICE
+                    if letter_locked
+                    else (b.get("content", "") or "")[:80]
+                ),
+                "letter_locked": letter_locked,
             })
         return JSONResponse({
             "ok": True,
@@ -633,7 +1081,7 @@ def register(mcp) -> None:
 
     @mcp.custom_route("/api/bucket/{bucket_id}", methods=["DELETE"])
     async def api_bucket_delete(request: Request) -> Response:
-        """Delete to archive (F-10): requires ?confirm=true. Moves file to archive/ + stamps deleted_at."""
+        """Submit a human deletion request for a formal bucket."""
         from starlette.responses import JSONResponse
         err = sh._require_auth(request)
         if err:
@@ -642,12 +1090,26 @@ def register(mcp) -> None:
             return JSONResponse({"error": "confirm=true required for delete-to-archive"}, status_code=400)
         bucket_id = request.path_params["bucket_id"]
         try:
-            ok = await sh.bucket_mgr.delete(bucket_id)
-            if not ok:
-                return JSONResponse({"error": "bucket not found"}, status_code=404)
-            return JSONResponse({"ok": True, "deleted": True})
+            try:
+                body = await sh._read_json_object(request)
+            except Exception:
+                body = {}
+            result = await sh.deletion_requests.submit(bucket_id, body.get("reason", ""))
+            if result.get("ok"):
+                return JSONResponse(result)
+            status = 404 if result.get("code") == "not_found" else 409 if result.get("code") in {"pending_exists", "daily_limit", "lifetime_limit"} else 400
+            return JSONResponse(result, status_code=status)
         except Exception as e:
             return JSONResponse({"error": str(e)}, status_code=500)
+
+    @mcp.custom_route("/api/bucket/{bucket_id}/deletion-request/withdraw", methods=["POST"])
+    async def api_bucket_delete_withdraw(request: Request) -> Response:
+        from starlette.responses import JSONResponse
+        err = sh._require_auth(request)
+        if err:
+            return err
+        result = await sh.deletion_requests.withdraw(request.path_params["bucket_id"])
+        return JSONResponse(result, status_code=200 if result.get("ok") else 409)
 
 
     @mcp.custom_route("/api/buckets/purge", methods=["POST"])
@@ -684,8 +1146,11 @@ def register(mcp) -> None:
             all_b = await sh.bucket_mgr.list_all(include_archive=False)
             self_buckets = [
                 b for b in all_b
-                if b["metadata"].get("type") == "i"
-                or "__i__" in (b["metadata"].get("tags") or [])
+                if not is_letter_bucket(b)
+                and (
+                    b["metadata"].get("type") == "i"
+                    or "__i__" in (b["metadata"].get("tags") or [])
+                )
             ]
             self_buckets.sort(key=lambda b: b["metadata"].get("created", ""), reverse=True)
             result = []

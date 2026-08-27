@@ -7,7 +7,7 @@ import json
 import os
 from pathlib import Path
 import threading
-from typing import Callable, Iterator
+from typing import Iterator
 
 from ombrebrain.kernel.errors import LogIntegrityError
 
@@ -132,51 +132,6 @@ class WalStore:
         with self._locked():
             last_entry = self._last_entry_unlocked()
             return 1 if last_entry is None else last_entry.index + 1
-
-    def rewrite_excluding(
-        self,
-        predicate: Callable[[dict[str, object]], bool],
-    ) -> int:
-        """Atomically rewrite the WAL without payloads selected by predicate."""
-        with self._locked():
-            entries = list(self._replay_unlocked())
-            payloads = [
-                dict(entry.payload)
-                for entry in entries
-                if not predicate(dict(entry.payload))
-            ]
-            removed = len(entries) - len(payloads)
-            if removed <= 0:
-                return 0
-
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            temp_path = self.path.with_name(
-                f".{self.path.name}.purge-{os.getpid()}-{threading.get_ident()}.tmp"
-            )
-            previous_checksum = ""
-            with temp_path.open("w", encoding="utf-8", newline="\n") as handle:
-                for index, payload in enumerate(payloads, start=1):
-                    checksum = _entry_checksum(index, previous_checksum, payload)
-                    record = {
-                        "index": index,
-                        "previous_checksum": previous_checksum,
-                        "checksum": checksum,
-                        "payload": payload,
-                    }
-                    handle.write(
-                        json.dumps(
-                            record,
-                            ensure_ascii=False,
-                            separators=(",", ":"),
-                            allow_nan=False,
-                        )
-                    )
-                    handle.write("\n")
-                    previous_checksum = checksum
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temp_path, self.path)
-            return removed
 
     def _last_entry_unlocked(self) -> WalEntry | None:
         last_entry = None

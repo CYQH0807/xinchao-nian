@@ -11,25 +11,37 @@ tools/breath/search.py — 有 query 的检索模式
 - embedding 未配置/未启用/调用失败时明确提示并继续关键词/BM25 检索
 - 向量通道阈值 sim>=0.65；domain/tags/type 过滤与关键词通道完全一致
 - 命中正文不经过 LLM 摘要、改写或压缩，直接返回当前存储的 content
-- 命中后调 touch()，但不修改本次返回的正文或元数据
-- 检索结果 < 3 时 40% 概率从低权重旧桶里随机漂出 1-3 条「忽然想起来」
+- **3.6.0 起本分支完全只读**：命中不再 touch()。检索是「我去找它」，强化是
+  「找到之后，这条确实要紧」——绑在一起的话，查得勤就等于重要。要强化某条，
+  读完针对那一条 trace(bucket_id, reinforce=True)
+- 检索结果不足时，从低权重旧桶里随机漂出 3-5 条「忽然想起来」
 - 命中 0 条时回 webhook 报空，并给出可操作的引导文案
 
 不做什么（边界）：
 - 不返回 feel/plan/letter（专用通道有自己的入口）
-- pinned/protected/permanent 仍可被检索（也是记忆，只是同时在浮现模式置顶）
-- dont_surface=True 在检索中保留——主动遗忘只限制无参浮现
+- pinned/permanent 仍可检索并标为核心准则；protected 只在显式
+  检索命中时返回，并标为「受保护记忆」，不进入随机漂浮
+- dont_surface/digested 在真实检索命中中保留；只限制无参浮现和非命中随机漂浮
 
 对外暴露：surface_search(query, max_results, max_tokens, domain, valence,
                           arousal, tag_filter) → str
 ========================================
 """
 
-import asyncio
+from errors import ToolInputError
+import hashlib
+import random
+from datetime import datetime
+
 from ombrebrain.policy.surfacing import SurfacePolicyVM
 from .. import _runtime as rt
+from ..plan.core import is_letter_bucket
+from ombrebrain.storage.attribution import names_from_config
+from ombrebrain.storage.quote_store import quotes_from_metadata, render_quotes
+from ._date_range import bucket_in_created_range, parse_created_range
+from ._shared import bucket_has_tags, footprint_reader
 from ._verbatim import render_stored_bucket
-from .evidence import admit_direct_memory
+from utils import count_tokens_approx, parse_bool
 
 _SURFACE_POLICY = SurfacePolicyVM.default()
 
@@ -39,15 +51,40 @@ _SEMANTIC_DISABLED_NOTE = "[检索降级：语义索引暂不可用，本次仅�
 _BUDGET_NOTICE = "[token 预算不足：命中的下一条记忆未被截断或摘要，请提高 max_tokens 后重试。]"
 
 
-def _bucket_has_tags(meta: dict, tag_filter: list) -> bool:
-    if not tag_filter:
-        return True
-    bucket_tags = set(meta.get("tags", []) or [])
-    return all(t in bucket_tags for t in tag_filter)
-
-
 def _can_surface_search(bucket: dict) -> bool:
     return _SURFACE_POLICY.evaluate_bucket(bucket, mode="search").allowed
+
+
+def _is_archived(bucket: dict) -> bool:
+    meta = bucket.get("metadata", {}) or {}
+    return (
+        str(meta.get("type") or "").strip().lower() == "archived"
+        or bool(meta.get("deleted_at"))
+        or bool(meta.get("tombstone"))
+    )
+
+
+def _render_archived_hit(bucket: dict, footprint: str) -> tuple[str, int]:
+    bucket_id = str(bucket.get("id") or "")
+    protected_mark = (
+        "🛡️ [受保护记忆] "
+        if parse_bool(
+            (bucket.get("metadata", {}) or {}).get("protected"),
+            default=False,
+        )
+        else ""
+    )
+    header = (
+        f"{protected_mark}[query 命中·已删除到档案] [bucket_id:{bucket_id}] "
+        "[状态:已退出日常记忆，原文仍保留]"
+    )
+    rendered, _ = render_stored_bucket(bucket, header, footprint)
+    rendered += (
+        "\n[反思：这条记忆对当下的我有帮助吗？它值得被再次回忆吗？]"
+        f'\n[若决定恢复：trace(bucket_id="{bucket_id}", restore=True)]'
+    )
+    from utils import count_tokens_approx
+    return rendered, count_tokens_approx(rendered)
 
 
 async def _semantic_scores(query: str, top_k: int) -> tuple[dict[str, float], str]:
@@ -72,6 +109,62 @@ async def _semantic_scores(query: str, top_k: int) -> tuple[dict[str, float], st
         return {}, _SEMANTIC_DISABLED_NOTE
 
 
+def _semantic_diagnostics(
+    query: str,
+    vector_scores: dict[str, float],
+    semantic_notice: str,
+) -> dict:
+    """收集本次检索的可重建索引状态；不记录查询原文。"""
+    engine_status: dict = {}
+    status_reader = getattr(rt.embedding_engine, "status", None)
+    if callable(status_reader):
+        try:
+            raw_status = status_reader()
+            if isinstance(raw_status, dict):
+                engine_status = dict(raw_status)
+        except Exception as exc:
+            engine_status = {"status_error": f"{type(exc).__name__}: {exc}"}
+
+    outbox_status: dict = {}
+    status_reader = getattr(getattr(rt, "embedding_outbox", None), "status", None)
+    if callable(status_reader):
+        try:
+            raw_status = status_reader()
+            if isinstance(raw_status, dict):
+                outbox_status = dict(raw_status)
+        except Exception as exc:
+            outbox_status = {"status_error": f"{type(exc).__name__}: {exc}"}
+
+    ranked = sorted(vector_scores.items(), key=lambda item: item[1], reverse=True)
+    return {
+        "query_hash": hashlib.sha256(
+            query.encode("utf-8", errors="replace")
+        ).hexdigest()[:12],
+        "semantic_available": not bool(semantic_notice),
+        "vector_candidates": len(vector_scores),
+        "vector_top": [
+            {"bucket_id": bucket_id, "score": round(score, 6)}
+            for bucket_id, score in ranked[:5]
+        ],
+        "engine": {
+            key: engine_status.get(key)
+            for key in (
+                "enabled", "backend", "model", "vector_dim",
+                "embedding_count", "status_error",
+            )
+            if key in engine_status
+        },
+        "outbox": {
+            key: outbox_status.get(key)
+            for key in (
+                "running", "provider_ready", "pending", "retrying",
+                "last_success", "last_error", "status_error",
+            )
+            if key in outbox_status
+        },
+    }
+
+
 async def surface_search(
     query: str,
     max_results: int,
@@ -80,10 +173,21 @@ async def surface_search(
     valence: float,
     arousal: float,
     tag_filter: list,
+    date_from: str = "",
+    date_to: str = "",
+    with_quotes: bool = False,
+    created_from: "datetime | None" = None,
+    created_to: "datetime | None" = None,
 ) -> str:
     domain_filter = [d.strip() for d in domain.split(",") if d.strip()] or None
     q_valence = valence if 0 <= valence <= 1 else None
     q_arousal = arousal if 0 <= arousal <= 1 else None
+    # dispatch() 已经解析并校验过一次，直接用；单独调用本函数（测试、旧调用方）
+    # 时才现场解析。两条路解析的是同一个 _date_range。
+    if created_from is None and created_to is None:
+        created_from, created_to = parse_created_range(date_from, date_to)
+
+    _footprint = footprint_reader()
 
     # A full bucket id is an address, not a semantic query.  Resolve it before
     # embedding/BM25 work so callers can reliably read the on-disk source text
@@ -92,7 +196,12 @@ async def surface_search(
     # visibility boundary as ordinary search.
     exact_id = query.strip()
     try:
-        exact_bucket = await rt.bucket_mgr.get(exact_id)
+        exact_reader = getattr(rt.bucket_mgr, "get_including_archive", None)
+        exact_bucket = (
+            await exact_reader(exact_id)
+            if callable(exact_reader)
+            else await rt.bucket_mgr.get(exact_id)
+        )
     except Exception as exc:
         rt.logger.warning(
             f"breath exact bucket lookup failed; continuing with search: "
@@ -100,23 +209,46 @@ async def surface_search(
         )
         exact_bucket = None
     if exact_bucket:
+        if is_letter_bucket(exact_bucket):
+            raise ToolInputError("Letter 不通过普通 breath 检索返回；请使用 letter_read。")
         meta = exact_bucket.get("metadata", {}) or {}
-        is_archived = meta.get("type") == "archived" or bool(meta.get("deleted_at"))
+        is_archived = _is_archived(exact_bucket)
+        archived_original_kind = (
+            _footprint.original_kind(exact_id, meta) if is_archived else "dynamic"
+        )
+        if (
+            is_archived
+            and archived_original_kind not in ("feel", "plan", "letter")
+            and bucket_has_tags(meta, tag_filter)
+            and bucket_in_created_range(exact_bucket, created_from, created_to)
+        ):
+            rendered, entry_tokens = _render_archived_hit(
+                exact_bucket, _footprint(exact_bucket)
+            )
+            return rendered if entry_tokens <= max_tokens else _BUDGET_NOTICE
         if (
             not is_archived
             and meta.get("type") not in ("feel", "plan", "letter")
             and _can_surface_search(exact_bucket)
-            and _bucket_has_tags(meta, tag_filter)
+            and bucket_has_tags(meta, tag_filter)
+            and bucket_in_created_range(exact_bucket, created_from, created_to)
         ):
+            protected_mark = (
+                "🛡️ [受保护记忆] "
+                if parse_bool(meta.get("protected"), default=False)
+                else ""
+            )
             rendered, entry_tokens = render_stored_bucket(
                 exact_bucket,
-                f"[exact_bucket_id:true] [bucket_id:{exact_bucket['id']}]",
+                f"{protected_mark}[exact_bucket_id:true] "
+                f"[bucket_id:{exact_bucket['id']}]",
+                _footprint(exact_bucket),
             )
             if entry_tokens > max_tokens:
                 return _BUDGET_NOTICE
-            asyncio.create_task(
-                rt.bucket_mgr.touch_many([exact_bucket["id"]], ripple=False)
-            )
+            # 3.6.0：按完整 ID 取桶同样只读。这条路径存在的理由就是「改之前先读一眼
+            # 磁盘上的原文」（见上方注释），那是最不该被算作强化的一次读取——
+            # 越是要改它，越会先读它，读一次涨一次权重是纯粹的自我实现。
             if rt.fire_webhook:
                 await rt.fire_webhook(
                     "breath",
@@ -127,74 +259,162 @@ async def surface_search(
     vector_scores, semantic_notice = await _semantic_scores(
         query, top_k=max(max_results, _VECTOR_QUERY_TOPK)
     )
+    semantic_diag = _semantic_diagnostics(query, vector_scores, semantic_notice)
+    rt.logger.info("op=breath_search phase=semantic diagnostics=%s", semantic_diag)
 
+    search_kwargs = {
+        "limit": max(max_results, 20),
+        "domain_filter": domain_filter,
+        "query_valence": q_valence,
+        "query_arousal": q_arousal,
+        "vector_scores": vector_scores,
+    }
     try:
-        matches = await rt.bucket_mgr.search(
-            query,
-            limit=max(max_results, 20),
-            domain_filter=domain_filter,
-            query_valence=q_valence,
-            query_arousal=q_arousal,
-            vector_scores=vector_scores,
-        )
+        try:
+            matches = await rt.bucket_mgr.search(
+                query, include_archive=True, **search_kwargs
+            )
+        except TypeError as exc:
+            # Lightweight third-party/test managers may predate the archive
+            # option.  Preserve active search there; production supports it.
+            if "include_archive" not in str(exc):
+                raise
+            matches = await rt.bucket_mgr.search(query, **search_kwargs)
     except Exception as e:
         rt.logger.error(f"Search failed / 检索失败: {e}")
         return "检索过程出错，请稍后重试。"
 
-    admitted = []
-    rejected_reasons: dict[str, int] = {}
+    eligible_matches = []
     for bucket in matches:
-        if (
-            not _can_surface_search(bucket)
-            or bucket["metadata"].get("type") in ("feel", "plan", "letter")
-        ):
+        meta = bucket.get("metadata", {}) or {}
+        if is_letter_bucket(bucket):
             continue
-        admission = admit_direct_memory(
-            query,
-            bucket,
-            semantic_score=vector_scores.get(bucket["id"]),
-        )
-        if admission.allowed:
-            admitted.append(bucket)
-        else:
-            rejected_reasons[admission.reason] = (
-                rejected_reasons.get(admission.reason, 0) + 1
+        if _is_archived(bucket):
+            original_kind = _footprint.original_kind(
+                str(bucket.get("id") or ""), meta
             )
-    if rejected_reasons:
-        rt.logger.info(
-            "breath conservative admission rejected candidates: %s",
-            rejected_reasons,
-        )
-    matches = admitted
-    matches = [b for b in matches if _bucket_has_tags(b["metadata"], tag_filter)]
+            if original_kind in ("feel", "plan", "letter"):
+                continue
+        elif not _can_surface_search(bucket) or meta.get("type") in ("feel", "plan", "letter"):
+            continue
+        eligible_matches.append(bucket)
+    matches = eligible_matches
+    matches = [b for b in matches if bucket_has_tags(b["metadata"], tag_filter)]
+    matches = [
+        b for b in matches
+        if bucket_in_created_range(b, created_from, created_to)
+    ]
     matches = matches[:max_results]
+    rt.logger.info(
+        "op=breath_search phase=ranking query_hash=%s matches=%s ids=%s",
+        semantic_diag["query_hash"],
+        len(matches),
+        [bucket.get("id") for bucket in matches],
+    )
 
     results = []
     token_used = 0
     budget_blocked = False
-    touched_ids: list = []   # 性能 P2：浮现后统一在后台 touch，不在响应路径逐条 await
     for bucket in matches:
         meta = bucket["metadata"]
         bucket_id = bucket["id"]
-        is_core = meta.get("pinned") or meta.get("protected") or meta.get("type") == "permanent"
-        if is_core:
+        if _is_archived(bucket):
+            rendered, entry_tokens = _render_archived_hit(bucket, _footprint(bucket))
+        elif parse_bool(meta.get("protected"), default=False):
+            header = f"🛡️ [受保护记忆] [bucket_id:{bucket_id}]"
+            rendered, entry_tokens = render_stored_bucket(
+                bucket, header, _footprint(bucket)
+            )
+        elif meta.get("pinned") or meta.get("type") == "permanent":
             header = f"📌 [核心准则] [bucket_id:{bucket_id}]"
+            rendered, entry_tokens = render_stored_bucket(
+                bucket, header, _footprint(bucket)
+            )
         elif bucket.get("vector_match"):
             header = f"[语义关联] [bucket_id:{bucket_id}]"
+            rendered, entry_tokens = render_stored_bucket(
+                bucket, header, _footprint(bucket)
+            )
         else:
             header = f"[bucket_id:{bucket_id}]"
-        rendered, entry_tokens = render_stored_bucket(bucket, header)
+            rendered, entry_tokens = render_stored_bucket(
+                bucket, header, _footprint(bucket)
+            )
+        # 引语：唯一的出口就在这里。默认不附加——每一条浮现路径
+        # （breath / dream / catalog / feel）走的都是白名单渲染，读不到这个字段。
+        # 只有我在这次调用里明确说了「我想知道当时是怎么说的」，它才出现。
+        # 附加之后必须重算 token：预算是按实际返回的字数算的，不是按正文。
+        if with_quotes:
+            quote_block = render_quotes(
+                quotes_from_metadata(meta),
+                **names_from_config(getattr(rt, "config", None)),
+            )
+            if quote_block:
+                rendered = f"{rendered}\n{quote_block}"
+                entry_tokens = count_tokens_approx(rendered)
         if token_used + entry_tokens > max_tokens:
             budget_blocked = True
             break
         results.append(rendered)
         token_used += entry_tokens
-        touched_ids.append(bucket_id)
 
-    # 性能 P2：把 touch 移出响应路径 —— 浮现完的桶在后台一次性更新激活，
-    # ripple=False 跳过读全库的时间涟漪。响应不再等这些写盘/涟漪。
-    if touched_ids:
-        asyncio.create_task(rt.bucket_mgr.touch_many(touched_ids, ripple=False))
+    # --- 3.6.0：检索不再强化。retrieval ≠ reinforcement ---
+    #
+    # 原来这里对**每一条命中**都 touch()：刷新 last_active、activation_count +1。
+    # 于是「被频繁查询」等价于「更重要」——我为了核对事实、debug、反复找同一件事
+    # 而读一条记忆，读着读着它的权重就爬到了最高。实测最高积到 51，新桶再也排不进
+    # 浮现区。这不是记忆在变重要，是我查得勤。
+    #
+    # 检索是「我去找它」，强化是「找到之后，这条确实要紧」。前者是我的动作，
+    # 后者是关于这条记忆的判断，只有读完才知道。把两者绑在一起，等于让读取行为
+    # 自己给自己投票。
+    #
+    # 所以这条路径现在是**只读的**，一条都不 touch。要强化某条，读完之后针对
+    # 那一条显式说：trace(bucket_id, reinforce=True)。是「那一条」而不是「这批
+    # 候选」——检索命中里绝大多数只是路过。
+
+    # 检索命中不足时保留设计上的自由联想；用独立分区明确标记，
+    # 避免调用方把随机旧桶误当成查询命中。
+    if not budget_blocked and len(matches) < min(3, max_results):
+        try:
+            all_buckets = await rt.bucket_mgr.list_all(include_archive=False)
+            matched_ids = {b["id"] for b in matches}
+            low_weight = [
+                b for b in all_buckets
+                if b["id"] not in matched_ids
+                and _SURFACE_POLICY.evaluate_bucket(
+                    b, mode="spontaneous"
+                ).allowed
+                and not is_letter_bucket(b)
+                and b["metadata"].get("type") not in ("feel", "plan", "letter")
+                and not parse_bool(
+                    b["metadata"].get("protected"), default=False
+                )
+                and rt.decay_engine.calculate_score(b["metadata"]) < 2.0
+                and bucket_in_created_range(b, created_from, created_to)
+            ]
+            remaining_slots = max(0, max_results - len(matches))
+            if low_weight and remaining_slots:
+                drifted = random.sample(
+                    low_weight,
+                    min(random.randint(3, 5), len(low_weight), remaining_slots),
+                )
+                drift_results = []
+                for b in drifted:
+                    rendered, entry_tokens = render_stored_bucket(
+                        b,
+                        f"[联想浮现·非检索命中] [bucket_id:{b['id']}]",
+                        _footprint(b),
+                    )
+                    if token_used + entry_tokens > max_tokens:
+                        budget_blocked = True
+                        break
+                    drift_results.append(rendered)
+                    token_used += entry_tokens
+                if drift_results:
+                    results.append("=== 忽然想起来（非检索命中） ===\n" + "\n---\n".join(drift_results))
+        except Exception as e:
+            rt.logger.warning(f"Random surfacing failed / 随机浮现失败: {e}")
 
     if not results:
         if budget_blocked:
@@ -203,7 +423,7 @@ async def surface_search(
             await rt.fire_webhook("breath", {"mode": "empty", "matches": 0})
         empty_text = (
             f"没有匹配到「{query}」相关的记忆。\n"
-            "可以换个关键词试试，或不带 query 看当下权重池；feel 用 breath(domain=\"feel\")，信件用 letter_read。"
+            "可以换个关键词试试，或用 breath() 看当下权重池；feel 用 breath_advanced(domain=\"feel\")，信件用 letter_read。"
         )
         return f"{semantic_notice}\n{empty_text}" if semantic_notice else empty_text
 

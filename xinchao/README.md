@@ -1,16 +1,17 @@
-# 心潮·念 3.1
+# 心潮·念 3.2
 
 心潮是一个独立、可自托管的 AI 动态状态层。它在对话之外持续维护驱动力、念头池、疲惫、睡眠、梦境余韵与短期窗口状态，并通过 HTTP API 或远程 MCP 接入不同模型、设备和前端。
 
 > 心潮模拟可解释的动态状态，不宣称产生意识、情感或生命。核心状态机可离线运行；模型、长期记忆、OAuth 和通知均为可选适配器。
 
-## 3.1 更新重点
+## 3.2 更新重点
 
 - **Personality Core 性格内核层**：新增与 12 维当下驱力完全分开的月度内核。由 AI 每月自主回顾和评分，人类不参与；私有 JSON 缺失或损坏时自动回到中性。
 - **单向、极慢的基线偏置**：仅爱与依恋、表达、平静与安全、欲望与动机可影响批准的驱力，并硬封顶在 ±10%；系统不会根据驱力反过来更改性格评分。
 - **`pending_from_me` 去留权收回用户**：AI 只能创建待交付内容、在真正说出后回执；只有用户可以选择留下（hold）或放下（drop）。
 - **引用式记忆关联**：念头与梦可围绕具体记忆桶生成，但心潮不按 ID 改写 OB 正文；用户 hold 后仍使用现有 `grow` 落地并保留溯源关系。
 - **饱足期与驱力耦合**：满足后默认保留 2 小时“饱”的平台期，只暂停自然增长；真实事件、记忆共振和输出回流仍然可以穿透。
+- **Ombre v3.6.3 适配**：代理完整新版 16 个基础工具，并按 Ombre 的持久开关同步 `You` / `Them`；旧版 `purge/forget/restore` 不再伪装成新版工具。
 
 > 性格内核评分只能由 AI 显式调用受鉴权 MCP 工具完成。心潮不会根据 12 维驱力自动反推人格；月度材料包与低频 OB 记账仍属于后续流程。
 
@@ -139,9 +140,22 @@ https://xinchao.example.com/mcp
 | `xinchao_cabin_note` | AI 主动给用户的小屋留一封信或便签 |
 | `xinchao_pending_create` | AI 在独处时创建一条想等用户回来再说的内容 |
 | `xinchao_pending_consumed` | AI 在确实说出后回执；不代表替用户选择留下或放下 |
+| `xinchao_hold_status` | 查询默认异步 `hold` 的排队、执行、成功或失败状态 |
+| `xinchao_hold_retry` | 手动重新排队失败的 `hold` 任务 |
 | `xinchao_personality_reflect` | AI 每月自主完成一次完整 14 维内核评分；人类不参与，同月不可覆盖 |
 
 `session_id` 是可选覆盖值。正常情况下服务端会使用 MCP 连接自带的稳定窗口 ID。
+
+### `hold` 的异步落地
+
+经心潮 MCP 调用 Ombre 的 `hold` 默认先把完整参数写入本地持久化任务队列，成功后立即返回
+`job_id`；后台 worker 再执行 Ombre 的完整搜索、合并/创建和向量化流程。调用返回只代表任务已
+可靠入队，不代表 bucket 已经完成。使用 `xinchao_hold_status` 查询最终的 `ombreBucketId`，失败时
+使用 `xinchao_hold_retry` 重新排队。
+
+任务文件默认写入 `/app/state/hold-jobs.json`，可通过 `HOLD_JOBS_PATH` 覆盖；worker 超时和轮询间隔
+分别由 `OMBRE_HOLD_TIMEOUT_MS` 与 `OMBRE_HOLD_QUEUE_POLL_SECONDS` 控制。心潮内部梦境写入仍使用同步
+适配器，因为该路径需要在同一轮结算中继续处理 bucket ID。
 
 ## HTTP API
 

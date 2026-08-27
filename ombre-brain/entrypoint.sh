@@ -15,9 +15,9 @@
 # 处理逻辑：
 #   1. 配置路径取 $OMBRE_CONFIG_PATH，未设则退回 /app/config.yaml（老行为，兼容现有部署）。
 #   2. 确保父目录存在。
-#   3. 若该路径是目录（Docker 副作用）：rmdir / rm -rf 常规删除；删不掉就用
-#      `find -mindepth 1 -delete` 清空内容兜底（即便目录本身是挂载点删不掉），再试 rmdir。
-#   4. 删成功（路径已不存在）→ 从内置默认模板初始化一份。
+#   3. 若该路径已是目录，立即 fail closed。配置路径来自环境变量，绝不能对它
+#      `rm -rf`/`find -delete`；误指到记忆卷时那会删掉用户数据。
+#   4. 路径不存在则从内置默认模板初始化。
 #   5. 最终校验：路径必须是普通文件，否则打印清晰指引并 FATAL 退出（不带病启动）。
 
 IMAGE_ROOT="${OMBRE_IMAGE_ROOT:-/app}"
@@ -26,21 +26,16 @@ DEFAULT="$IMAGE_ROOT/config.default.yaml"
 
 mkdir -p "$(dirname "$CONFIG")" 2>/dev/null || true
 
-# --- 3. 若是目录，尽全力把它清掉 ---
+# --- 3. 目录绝不自动删除：它可能就是整个记忆卷 ---
 if [ -d "$CONFIG" ]; then
     echo "[entrypoint] '$CONFIG' is a directory (Docker created it because the host file was missing)."
-    echo "[entrypoint] Trying to remove it and re-initialize from defaults..."
-    rmdir "$CONFIG" 2>/dev/null || rm -rf "$CONFIG" 2>/dev/null || true
-    if [ -d "$CONFIG" ]; then
-        # 直接删除失败（多半是活动 bind mount，挂载点自身删不掉）。
-        # 兜底：清空目录内容（mindepth 1 = 不碰目录自身），再试着删掉空目录。
-        echo "[entrypoint] Direct removal failed; clearing its contents as a fallback..."
-        find "$CONFIG" -mindepth 1 -delete 2>/dev/null || true
-        rmdir "$CONFIG" 2>/dev/null || true
-    fi
+    echo "[entrypoint] FATAL: refusing to delete a directory supplied as OMBRE_CONFIG_PATH."
+    echo "[entrypoint] Point OMBRE_CONFIG_PATH at a file, for example:"
+    echo "[entrypoint]     /app/buckets/config.yaml"
+    exit 1
 fi
 
-# --- 4. 不存在则从默认模板初始化（上面删成功后会走到这；纯缺文件也走这）---
+# --- 4. 不存在则从默认模板初始化 ---
 if [ ! -e "$CONFIG" ]; then
     echo "[entrypoint] Initializing config from defaults at '$CONFIG'..."
     cp "$DEFAULT" "$CONFIG"
@@ -94,12 +89,29 @@ _write_marker() {
     mv -f "$marker_tmp" "$marker" 2>/dev/null
 }
 
+# 随镜像播种到运行时目录的可选顶层目录。src / frontend 是必需的（缺了跑不起来，
+# 单独处理），这里只列「有就播种、没有也不影响启动」的：
+#   docs/   —— adr_requirements 诊断在运行时目录下读 docs/adr/
+#   tools/  —— preflight_cli_diagnostics 诊断要求 tools/vnext_preflight.py
+#   kernel/ —— vnext_preflight 的 rust_kernel_scaffold 契约检查对象
+# 此前不播种它们，这三项诊断在任何 Docker 部署上都恒红。老镜像没有这些目录，
+# 因此一律「存在才处理」，绝不能让缺失阻断启动或回滚。
+SEED_DIRS_OPTIONAL="docs tools kernel"
+
 _restore_seed_swap() {
     old_dir="$1"
     rm -rf "$CODE_DIR/src" "$CODE_DIR/frontend" 2>/dev/null || true
     [ ! -d "$old_dir/src" ] || mv "$old_dir/src" "$CODE_DIR/src" 2>/dev/null || true
     [ ! -d "$old_dir/frontend" ] || mv "$old_dir/frontend" "$CODE_DIR/frontend" 2>/dev/null || true
-    [ ! -f "$old_dir/VERSION" ] || cp -a "$old_dir/VERSION" "$CODE_DIR/VERSION" 2>/dev/null || true
+    # 可选目录：回滚到旧状态——旧状态没有就该删掉新播种进来的，不做恢复。
+    for seed_dir in $SEED_DIRS_OPTIONAL; do
+        rm -rf "$CODE_DIR/$seed_dir" 2>/dev/null || true
+        [ ! -d "$old_dir/$seed_dir" ] || mv "$old_dir/$seed_dir" "$CODE_DIR/$seed_dir" 2>/dev/null || true
+    done
+    for root_file in VERSION requirements.txt requirements.lock.txt; do
+        rm -f "$CODE_DIR/$root_file" 2>/dev/null || true
+        [ ! -f "$old_dir/$root_file" ] || cp -a "$old_dir/$root_file" "$CODE_DIR/$root_file" 2>/dev/null || true
+    done
 }
 
 _seed_image_code() {
@@ -110,7 +122,19 @@ _seed_image_code() {
     mkdir -p "$stage" "$old_dir" 2>/dev/null || return 1
     cp -a "$IMAGE_ROOT/src" "$stage/src" 2>/dev/null || { rm -rf "$stage" "$old_dir"; return 1; }
     cp -a "$IMAGE_ROOT/frontend" "$stage/frontend" 2>/dev/null || { rm -rf "$stage" "$old_dir"; return 1; }
-    cp -a "$IMAGE_ROOT/VERSION" "$stage/VERSION" 2>/dev/null || true
+    # 可选目录：镜像里有才复制；复制失败说明镜像损坏，按整体失败处理。
+    for seed_dir in $SEED_DIRS_OPTIONAL; do
+        [ ! -d "$IMAGE_ROOT/$seed_dir" ] || cp -a "$IMAGE_ROOT/$seed_dir" "$stage/$seed_dir" 2>/dev/null || {
+            rm -rf "$stage" "$old_dir"
+            return 1
+        }
+    done
+    for root_file in VERSION requirements.txt requirements.lock.txt; do
+        [ ! -f "$IMAGE_ROOT/$root_file" ] || cp -a "$IMAGE_ROOT/$root_file" "$stage/$root_file" 2>/dev/null || {
+            rm -rf "$stage" "$old_dir"
+            return 1
+        }
+    done
     [ -f "$stage/src/server.py" ] && [ -d "$stage/frontend" ] || {
         rm -rf "$stage" "$old_dir" 2>/dev/null
         return 1
@@ -128,7 +152,17 @@ _seed_image_code() {
             return 1
         }
     fi
-    [ ! -f "$CODE_DIR/VERSION" ] || cp -a "$CODE_DIR/VERSION" "$old_dir/VERSION" 2>/dev/null || true
+    # 到这里 src（可能还有 frontend）已经移进 old_dir，回滚要走 _restore_seed_swap。
+    for seed_dir in $SEED_DIRS_OPTIONAL; do
+        [ ! -d "$CODE_DIR/$seed_dir" ] || mv "$CODE_DIR/$seed_dir" "$old_dir/$seed_dir" 2>/dev/null || {
+            _restore_seed_swap "$old_dir"
+            rm -rf "$stage" "$old_dir" 2>/dev/null
+            return 1
+        }
+    done
+    for root_file in VERSION requirements.txt requirements.lock.txt; do
+        [ ! -f "$CODE_DIR/$root_file" ] || cp -a "$CODE_DIR/$root_file" "$old_dir/$root_file" 2>/dev/null || true
+    done
 
     mv "$stage/src" "$CODE_DIR/src" 2>/dev/null || {
         _restore_seed_swap "$old_dir"
@@ -140,7 +174,21 @@ _seed_image_code() {
         rm -rf "$stage" "$old_dir" 2>/dev/null
         return 1
     }
-    [ ! -f "$stage/VERSION" ] || cp -a "$stage/VERSION" "$CODE_DIR/VERSION" 2>/dev/null || true
+    for seed_dir in $SEED_DIRS_OPTIONAL; do
+        [ ! -d "$stage/$seed_dir" ] || mv "$stage/$seed_dir" "$CODE_DIR/$seed_dir" 2>/dev/null || {
+            _restore_seed_swap "$old_dir"
+            rm -rf "$stage" "$old_dir" 2>/dev/null
+            return 1
+        }
+    done
+    for root_file in VERSION requirements.txt requirements.lock.txt; do
+        rm -f "$CODE_DIR/$root_file" 2>/dev/null || true
+        [ ! -f "$stage/$root_file" ] || cp -a "$stage/$root_file" "$CODE_DIR/$root_file" 2>/dev/null || {
+            _restore_seed_swap "$old_dir"
+            rm -rf "$stage" "$old_dir" 2>/dev/null || true
+            return 1
+        }
+    done
     rm -rf "$stage" 2>/dev/null || true
 
     # A previously healthy runtime becomes the crash rollback point for this image seed.
@@ -187,7 +235,15 @@ _bootstrap_code() {
         rm -rf "$CODE_DIR/src" "$CODE_DIR/frontend" 2>/dev/null
         cp -a "$CODE_DIR/_prev/src" "$CODE_DIR/src" 2>/dev/null || return 1
         cp -a "$CODE_DIR/_prev/frontend" "$CODE_DIR/frontend" 2>/dev/null || true
-        [ -f "$CODE_DIR/_prev/VERSION" ] && cp -a "$CODE_DIR/_prev/VERSION" "$CODE_DIR/VERSION" 2>/dev/null
+        # 可选目录：回滚点没有就该删掉，让运行时树与 _prev 完全一致。
+        for seed_dir in $SEED_DIRS_OPTIONAL; do
+            rm -rf "$CODE_DIR/$seed_dir" 2>/dev/null || true
+            [ ! -d "$CODE_DIR/_prev/$seed_dir" ] || cp -a "$CODE_DIR/_prev/$seed_dir" "$CODE_DIR/$seed_dir" 2>/dev/null || true
+        done
+        for root_file in VERSION requirements.txt requirements.lock.txt; do
+            rm -f "$CODE_DIR/$root_file" 2>/dev/null || true
+            [ ! -f "$CODE_DIR/_prev/$root_file" ] || cp -a "$CODE_DIR/_prev/$root_file" "$CODE_DIR/$root_file" 2>/dev/null || return 1
+        done
         rm -rf "$CODE_DIR/_prev" 2>/dev/null
         FAILS=0
         echo 0 > "$CODE_DIR/.boot_fails" 2>/dev/null || true
@@ -224,7 +280,14 @@ _bootstrap_code() {
     fi
 
     if [ -n "$RESEED_REASON" ]; then
-        echo "[entrypoint] code-state=reseed reason=$RESEED_CODE: 播种代码到持久卷 $CODE_DIR：$RESEED_REASON"
+        # ${CODE_DIR} 的花括号不能省：后面紧跟的全角「：」是多字节字符，
+        # shell 会把它的首字节当成变量名的一部分去展开一个不存在的变量，
+        # 结果是路径整个丢失、并向 stdout 吐出半个字符（非法 UTF-8）。
+        # ${CODE_DIR} 的花括号一个都不能省。这里原本写的 $CODE_DIR：，
+        # 全角冒号的第一个字节被当成变量名的一部分吃掉了，路径没了，
+        # 还顺手吐出一串非法 UTF-8。四个测试为此红了不知道多久，
+        # 谁看日志都觉得是路径配错了。是个冒号。
+        echo "[entrypoint] code-state=reseed reason=$RESEED_CODE: 播种代码到持久卷 ${CODE_DIR}：$RESEED_REASON"
         _seed_image_code || return 1
         _write_marker "$CODE_DIR/.seeded_image_version" "$IMG_VER" || return 1
         [ -z "$IMG_FP" ] || _write_marker "$CODE_DIR/.seeded_image_fingerprint" "$IMG_FP" || return 1

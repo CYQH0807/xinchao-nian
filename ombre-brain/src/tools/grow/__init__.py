@@ -19,141 +19,164 @@ grow 是「我把一段长内容整理进记忆」。短内容（<30 字）走 s
 ========================================
 """
 
-import hashlib
-import json
-import os
-import time
-from pathlib import Path
+from errors import ToolInputError
+import re
 from typing import Optional
+
+from ombrebrain.storage.source_store import normalize_source_ranges
 
 from .. import _runtime as rt
 from .._common import check_grow_input_size, check_grow_items_payload
 from .shortpath import grow_shortpath
 from .core import grow_core, grow_items
-from ..write_admission import decide_write, default_ledger_path
+from .retry_guard import request_fingerprint, run_once
 
 
-# ---------- 重复提交去重（幂等重试）----------
-# 场景：客户端（如 claude.ai 连接器）等不到 grow 返回先超时，但服务端其实已写入；
-# 上层 AI 以为失败而重试，同一段日记被反复拆成新桶。这里按 (content/items, auto, source)
-# 指纹记住最近一次成功结果，窗口内同样内容再来时直接返回上次结果、不再写入。
-# 只缓存成功结果（失败必须能重试）；IO 出错时静默放行，绝不阻塞 grow 本身。
-_DEDUPE_WINDOW_SECONDS = max(0, int(os.environ.get("OMBRE_GROW_DEDUPE_SECONDS", "21600") or 0))  # 默认 6h，0=关闭
-_DEDUPE_MAX_ENTRIES = 200
+_TITLE_ANCHOR_SPLIT_RE = re.compile(
+    r"[\s·•|/\\:：,，。;；!?！？()（）\[\]【】<>《》—–_-]+"
+)
+_MIN_TITLE_ANCHOR_CHARS = 4
 
 
-def _dedupe_path() -> Path:
-    cfg = rt.config if isinstance(rt.config, dict) else {}
-    buckets_dir = Path(str(cfg.get("buckets_dir") or "buckets"))
-    return buckets_dir / ".companion" / "grow-recent.json"
+def _compact_evidence_text(value: object) -> str:
+    return "".join(str(value or "").casefold().split())
 
 
-def grow_fingerprint(content: str, items: Optional[list], auto: bool, source: str) -> str:
-    payload = json.dumps(
-        {"c": (content or "").strip(), "i": items or [], "a": bool(auto), "s": source or ""},
-        ensure_ascii=False, sort_keys=True,
-    )
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+def _title_anchors(value: object) -> list[str]:
+    title = str(value or "").strip()
+    if not title:
+        return []
+    anchors: list[str] = []
+    for part in _TITLE_ANCHOR_SPLIT_RE.split(title):
+        compact = _compact_evidence_text(part)
+        if len(compact) >= _MIN_TITLE_ANCHOR_CHARS and compact not in anchors:
+            anchors.append(compact)
+    return anchors
 
 
-def is_grow_success(result: str) -> bool:
-    """grow 的成功文案：长文带 batch:g_xxx；短文走 hold 路径有固定开头。失败文案都没有这两样。"""
-    r = result or ""
-    return "batch:" in r or r.startswith("短内容已按 hold 路径保存")
+def _range_contains_line(ranges: list[list[int]], line_no: int) -> bool:
+    return any(start <= line_no <= end for start, end in ranges)
 
 
-def _load_recent(path: Path, now: float) -> dict:
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:
-        return {}
-    if not isinstance(data, dict):
-        return {}
-    return {k: v for k, v in data.items()
-            if isinstance(v, dict) and now - float(v.get("at", 0)) < _DEDUPE_WINDOW_SECONDS}
+def _detect_shifted_source_ranges(items: list, source_content: str) -> list[str]:
+    """只用逐字标题锚点识别整批 source_ranges 的明显同向错位。"""
+
+    ranged_items: list[tuple[dict, list[list[int]]]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        try:
+            ranges = normalize_source_ranges(item.get("source_ranges"))
+        except ValueError:
+            continue
+        if ranges:
+            ranged_items.append((item, ranges))
+    if len(ranged_items) < 2:
+        return []
+
+    compact_lines = [
+        _compact_evidence_text(line) for line in source_content.splitlines()
+    ]
+    suspects: list[tuple[str, int]] = []
+
+    for item, ranges in ranged_items:
+        anchors = _title_anchors(item.get("title"))
+        if not anchors:
+            continue
+
+        hit_lines: set[int] = set()
+        supported = False
+        for anchor in anchors:
+            anchor_hits = {
+                index
+                for index, line in enumerate(compact_lines, start=1)
+                if anchor in line
+            }
+            if any(_range_contains_line(ranges, line_no) for line_no in anchor_hits):
+                supported = True
+                break
+            hit_lines.update(anchor_hits)
+
+        if supported or not hit_lines:
+            continue
+
+        range_start = min(start for start, _end in ranges)
+        range_end = max(end for _start, end in ranges)
+        if all(line_no > range_end for line_no in hit_lines):
+            direction = 1
+        elif all(line_no < range_start for line_no in hit_lines):
+            direction = -1
+        else:
+            continue
+        suspects.append((str(item.get("title") or "未命名"), direction))
+
+    if len(suspects) < 2:
+        return []
+    if len({direction for _title, direction in suspects}) != 1:
+        return []
+    return [title for title, _direction in suspects]
 
 
-def recent_grow_result(fp: str, *, path: Optional[Path] = None, now: Optional[float] = None) -> Optional[dict]:
-    if _DEDUPE_WINDOW_SECONDS <= 0:
-        return None
-    now = time.time() if now is None else now
-    path = path or _dedupe_path()
-    return _load_recent(path, now).get(fp)
-
-
-def remember_grow_result(fp: str, result: str, *, path: Optional[Path] = None, now: Optional[float] = None) -> None:
-    if _DEDUPE_WINDOW_SECONDS <= 0 or not is_grow_success(result):
-        return
-    now = time.time() if now is None else now
-    path = path or _dedupe_path()
-    try:
-        data = _load_recent(path, now)
-        data[fp] = {"at": now, "result": result}
-        if len(data) > _DEDUPE_MAX_ENTRIES:
-            for k in sorted(data, key=lambda k: data[k]["at"])[: len(data) - _DEDUPE_MAX_ENTRIES]:
-                data.pop(k, None)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-        os.replace(tmp, path)
-    except Exception as e:  # 去重是锦上添花，出错不许影响正常写入
-        rt.logger and rt.logger.warning(f"grow dedupe ledger write failed: {e}")
-
-
-def _dedupe_reply(hit: dict, now: float) -> str:
-    minutes = max(0, int((now - float(hit.get("at", now))) // 60))
-    return (
-        f"（重复提交：同样的内容 {minutes} 分钟前已整理入库，本次未重复写入。"
-        f"若确需再次导入，请修改内容或等待去重窗口过期。）\n上次结果：\n{hit.get('result', '')}"
-    )
-
+def _shifted_source_ranges_error(items: list, source_content: str) -> str:
+    shifted_titles = _detect_shifted_source_ranges(items, source_content)
+    if not shifted_titles:
+        return ""
+    preview = "、".join(shifted_titles[:3])
+    if len(shifted_titles) > 3:
+        preview += " 等"
+    raise ToolInputError("source_ranges 疑似与 items 错位："
+        f"{preview} 的显式标题只在各自声明范围之外同向出现。"
+        "为避免保存错误原文证据，本批次未创建任何桶；"
+        "请重新核对 1-based 闭区间。")
 
 
 async def dispatch(
-    content: str = "",
-    items: Optional[list] = None,
-    auto: Optional[bool] = False,
-    source: Optional[str] = "",
+    content: str = "", items: Optional[list] = None, test_data: bool = False
 ) -> str:
     await rt.decay_engine.ensure_started()
-    auto = bool(auto)
-    source = "" if source is None else str(source).strip()[:80]
-    fp = grow_fingerprint(content, items if isinstance(items, list) else None, auto, source)
-    hit = recent_grow_result(fp)
-    if hit:
-        return _dedupe_reply(hit, time.time())
 
     # 预拆分模式：上层 AI 已拆好 N 条最终正文 → 逐字入库，跳过 digest 的二次改写。
     # 传了 items（非空列表）即走此路；不传则行为与旧版完全一致（向后兼容）。
     if isinstance(items, list) and len(items) > 0:
+        # 这四处校验都在 grow_items() 之前，失败时一个桶都没建。
+        # helper 保持返回错误串（它们在 _common.py 里被多处共用），
+        # 由调用点负责抛出——判据是「这次调用有没有写东西」。
         err = check_grow_items_payload(items)
         if err:
-            return err
-        result = await grow_items(items, auto=auto, source=source)
-        remember_grow_result(fp, result)
-        return result
+            raise ToolInputError(err)
+        if content and content.strip():
+            err = check_grow_input_size(content)
+            if err:
+                raise ToolInputError(err)
+            err = _shifted_source_ranges_error(items, content)
+            if err:
+                raise ToolInputError(err)
+        fingerprint = request_fingerprint(
+            content=content, items=items, test_data=test_data
+        )
+        return await run_once(
+            fingerprint,
+            lambda: grow_items(
+                items, source_content=content, test_data=test_data
+            ),
+        )
 
     if not content or not content.strip():
-        return "内容为空，无法整理。"
+        raise ToolInputError("内容为空，无法整理。")
 
     err = check_grow_input_size(content)
     if err:
-        return err
+        raise ToolInputError(err)
 
+    fingerprint = request_fingerprint(
+        content=content, items=None, test_data=test_data
+    )
     if len(content.strip()) < 30:
-        admission = decide_write(
-            content,
-            auto=auto,
-            source=source,
-            ledger_path=default_ledger_path(rt.config) if auto else None,
+        return await run_once(
+            fingerprint,
+            lambda: grow_shortpath(content, test_data=test_data),
         )
-        if not admission.allowed:
-            if admission.reason == "technical_only":
-                return "自动写入已拒绝：纯技术内容不进入 Ombre Brain。"
-            return "自动候选暂未写入；人工 grow/hold 可直接保存。"
-        result = await grow_shortpath(content)
-        remember_grow_result(fp, result)
-        return result
-    result = await grow_core(content, auto=auto, source=source)
-    remember_grow_result(fp, result)
-    return result
+    return await run_once(
+        fingerprint,
+        lambda: grow_core(content, test_data=test_data),
+    )
