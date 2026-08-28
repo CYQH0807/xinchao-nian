@@ -24,7 +24,9 @@ import { memoryConnectionState } from './connection-diagnostics.js';
 import { PersonalityStore, computePersonalityStats } from './personality-store.js';
 import { addPending, dropPending, holdPending, markConsumed, markDelivered, markHoldSyncResult, selectForHoldSync } from './pending-queue.js';
 import { HoldJobStore } from './hold-job-queue.js';
+import { HoldMediaStore, readBinaryBody, stageHoldMediaArgs } from './hold-media-store.js';
 
+const MCP_BODY_MAX_BYTES = 16 * 1024 * 1024;
 const config = validateConfig(loadConfig());
 if (!config.serviceToken) throw new Error('SERVICE_TOKEN is required');
 // 拒绝占位值和弱 token —— 忘了换示例值就启动，等于把钥匙印在说明书上。
@@ -39,6 +41,10 @@ const store = new StateStore(config.statePath, () => newState());
 const model = new ModelClient(config.model);
 const ombre = new OmbreClient(config.ombre);
 const holdJobs = new HoldJobStore(config.holdJobsPath);
+const holdMedia = new HoldMediaStore(config.holdMediaPath, {
+  maxBytes: config.holdMediaMaxBytes,
+  ttlMs: config.holdMediaTtlHours * 60 * 60 * 1000,
+});
 const bark = new BarkClient(config.bark);
 const journal = new TransitionJournal(config.journalPath);
 const oauth = new OAuthProvider(config.oauth, (event, fields = {}) => log(event, fields));
@@ -52,6 +58,7 @@ const cabin = new CabinStore(config.cabin.statePath, config.cabin);
 const personality = new PersonalityStore(config.personalityPath);
 const bridgeStreams = new Set();
 await oauth.init();
+await holdMedia.init();
 await holdJobs.init();
 let cyclePromise = null;
 let holdWorkerPromise = null;
@@ -69,7 +76,20 @@ function holdRequestKey(args, requestContext = {}) {
 
 async function enqueueOmbreHold(args, requestContext = {}) {
   if (!config.ombre.writeEnabled) throw new Error('ombre_write_disabled');
-  const result = await holdJobs.enqueue(args, holdRequestKey(args, requestContext));
+  const requestKey = holdRequestKey(args, requestContext);
+  const prepared = await stageHoldMediaArgs(holdMedia, args);
+  let result;
+  try {
+    result = await holdJobs.enqueue(prepared.payload, requestKey);
+    // A duplicate request already owns its original staging file.  The newly
+    // uploaded copy is unique and can be discarded without touching the job.
+    if (result.duplicate) {
+      await holdMedia.release(prepared.stagedRefs.map((media_ref) => ({ media_ref })));
+    }
+  } catch (error) {
+    await holdMedia.release(prepared.stagedRefs.map((media_ref) => ({ media_ref })));
+    throw error;
+  }
   void kickHoldWorker().catch((error) => log('ombre_hold_worker_failed', { message: error.message }));
   return {
     accepted: true,
@@ -84,8 +104,14 @@ async function drainHoldJobs() {
     const job = await holdJobs.claimNext();
     if (!job) return;
     try {
-      const result = await ombre.hold(job.payload, config.ombre.holdTimeoutMs);
+      const payload = await holdMedia.materialize(job.payload);
+      const result = await ombre.hold(payload, config.ombre.holdTimeoutMs);
       const completed = await holdJobs.complete(job.id, result);
+      try {
+        await holdMedia.release(job.payload.media);
+      } catch (error) {
+        log('ombre_hold_media_cleanup_failed', { jobId: job.id, message: error.message });
+      }
       log('ombre_hold_job_succeeded', {
         jobId: job.id,
         bucketId: completed.result?.ombreBucketId ?? null,
@@ -626,13 +652,24 @@ function mcpAuthorized(request, url) {
   return safeEqual(supplied, config.mcp.pathToken);
 }
 
-async function body(request) {
+async function body(request, maxBytes = 1024 * 1024) {
   let raw = '';
   for await (const chunk of request) {
     raw += chunk;
-    if (raw.length > 1024 * 1024) throw new Error('request body too large');
+    if (Buffer.byteLength(raw, 'utf8') > maxBytes) throw new Error('request body too large');
   }
   return raw ? JSON.parse(raw) : {};
+}
+
+/** Decode the filename header used by the binary hold-media upload route. */
+function mediaFilenameHeader(value) {
+  const encoded = String(value ?? '').trim();
+  if (!encoded) return 'image';
+  try {
+    return decodeURIComponent(encoded).slice(0, 200) || 'image';
+  } catch {
+    return 'image';
+  }
 }
 
 /**
@@ -1033,6 +1070,19 @@ const server = createServer(async (request, response) => {
       });
     }
     if (await oauth.handle(request, response, url)) return;
+    if (url.pathname === '/v1/hold-media') {
+      if (!authorized(request)) return send(response, 401, { error: 'unauthorized' });
+      if (!config.ombre.writeEnabled) return send(response, 503, { error: 'ombre_write_disabled' });
+      if (request.method !== 'POST') {
+        return send(response, 405, { error: 'method not allowed' }, { Allow: 'POST' });
+      }
+      const mediaType = request.headers['x-media-type'] || request.headers['content-type'] || '';
+      const staged = await holdMedia.stage(await readBinaryBody(request, config.holdMediaMaxBytes), {
+        mediaType,
+        filename: mediaFilenameHeader(request.headers['x-media-filename']),
+      });
+      return send(response, 201, staged);
+    }
     if (url.pathname.startsWith('/bridge/v1')) {
       if (!config.bridge.enabled) return send(response, 404, { error: 'not found' });
       if (!bridgeAuthorized(request)) return send(response, 401, { error: 'unauthorized' });
@@ -1081,7 +1131,7 @@ const server = createServer(async (request, response) => {
       if (dashboardAuth.rateLimited(remoteAddress)) {
         return send(response, 429, { error: 'too many attempts' }, { 'Retry-After': '60' });
       }
-      const payload = await body(request);
+      const payload = await body(request, MCP_BODY_MAX_BYTES);
       const supplied = payload.accessToken ?? payload.access_token ?? payload.token ?? '';
       if (!dashboardAuth.verifyAccessToken(supplied, remoteAddress)) {
         return send(response, 401, { error: 'invalid credentials' });
@@ -1275,7 +1325,7 @@ const server = createServer(async (request, response) => {
         response.setHeader('Allow', 'POST, DELETE');
         return sendMcp(response, 405, { error: 'method not allowed' });
       }
-      const payload = await body(request);
+      const payload = await body(request, MCP_BODY_MAX_BYTES);
       const sessionId = transportSessionId(request, payload?.method === 'initialize');
       const result = await handleMcpMessage(payload, {
         defaultSessionId: sessionId,

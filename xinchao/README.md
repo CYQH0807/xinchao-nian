@@ -157,6 +157,12 @@ https://xinchao.example.com/mcp
 分别由 `OMBRE_HOLD_TIMEOUT_MS` 与 `OMBRE_HOLD_QUEUE_POLL_SECONDS` 控制。心潮内部梦境写入仍使用同步
 适配器，因为该路径需要在同一轮结算中继续处理 bucket ID。
 
+图片 hold 不把二进制或 Base64 写进任务文件：调用方先用同一枚 `SERVICE_TOKEN` 将图片 POST 到
+`/v1/hold-media`，得到短期 `media_ref`，再把这个引用随 `hold` 入队。worker 执行时从
+`HOLD_MEDIA_PATH`（默认 `/app/state/hold-media`）还原成 Ombre 的 `data_base64`，成功后删除暂存文件；
+启动时会清理超过 `HOLD_MEDIA_TTL_HOURS` 的孤儿文件。单张图片大小由 `HOLD_MEDIA_MAX_BYTES` 限制，
+默认 8 MiB。该目录应与其他 `/app/state` 数据一样挂载到持久卷。
+
 ## HTTP API
 
 除 `/health` 与 OAuth 发现/授权端点外，业务 API 都要求：
@@ -176,6 +182,7 @@ Authorization: Bearer <SERVICE_TOKEN>
 | `POST` | `/v1/conversation-event` | 写入一次明确互动事件 |
 | `POST` | `/v1/heartbeat` | 只刷新在场时间，不上传聊天正文 |
 | `POST` | `/v1/handoff-note` | 保存短期交接摘要 |
+| `POST` | `/v1/hold-media` | 暂存一张经鉴权的图片，返回供异步 `hold` 使用的 `media_ref` |
 | `POST` | `/v1/drive-feedback` | 管理端受控反馈接口 |
 | `GET` | `/v1/dashboard/snapshot` | 默认脱敏的可视化状态投影 |
 | `GET` | `/v1/dashboard/timeline` | 结构化变化时间线（无正文） |

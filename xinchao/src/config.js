@@ -20,6 +20,9 @@ export function loadConfig() {
     serviceToken: process.env.SERVICE_TOKEN ?? '',
     statePath: process.env.STATE_PATH ?? '/app/state/state.json',
     holdJobsPath: process.env.HOLD_JOBS_PATH ?? '/app/state/hold-jobs.json',
+    holdMediaPath: process.env.HOLD_MEDIA_PATH ?? '/app/state/hold-media',
+    holdMediaMaxBytes: number('HOLD_MEDIA_MAX_BYTES', 8 * 1024 * 1024, 64 * 1024, 25 * 1024 * 1024),
+    holdMediaTtlHours: number('HOLD_MEDIA_TTL_HOURS', 168, 1, 720),
     personalityPath: process.env.PERSONALITY_PATH ?? '/app/state/personality.json',
     personality: {
       // Optional presentation metadata only. Scores and reasons still come
