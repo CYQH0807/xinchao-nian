@@ -36,9 +36,10 @@ services:
       - OMBRE_EMBED_MODEL=${OMBRE_EMBED_MODEL:-}
       - OMBRE_DASHBOARD_PASSWORD=${OMBRE_DASHBOARD_PASSWORD}
       - OMBRE_MCP_REQUIRE_AUTH=true
-      # 联合部署同时保留 OAuth，并允许心潮用静态内部令牌调用 Ombre。
+      # OB 3.6+：/mcp 的 Bearer 走 mcp_auth_mode，默认 oauth 会把静态密钥全部 401；hybrid 同时接受静态密钥，
+      # 静态密钥读 OMBRE_MCP_TOKEN（3.6 改名）。旧版 OB 不认这两个变量，多传无害。
       - OMBRE_MCP_AUTH_MODE=${OMBRE_MCP_AUTH_MODE:-hybrid}
-      - OMBRE_MCP_TOKEN=${OMBRE_MCP_TOKEN:-}
+      - OMBRE_MCP_TOKEN=${OMBRE_MCP_TOKEN:-${OMBRE_MCP_SERVICE_TOKEN:-}}
       - OMBRE_MCP_SERVICE_TOKEN=${OMBRE_MCP_SERVICE_TOKEN:-}
       - OMBRE_TRUSTED_PROXY_CIDRS=${OMBRE_TRUSTED_PROXY_CIDRS:-127.0.0.0/8,::1/128}
       # sidecar：OB 在内部网络里读心潮的"此刻状态"
@@ -68,6 +69,8 @@ services:
     environment:
       # 心潮调 OB 走内部网络（容器名解析），不经公网
       - OMBRE_MCP_URL=${OMBRE_MCP_URL:-http://ombre-brain:8000/mcp}
+      # 与 OB 共用同一枚内部令牌；未单独填 OMBRE_MCP_TOKEN 时回退到服务令牌。
+      - OMBRE_MCP_TOKEN=${OMBRE_MCP_TOKEN:-${OMBRE_MCP_SERVICE_TOKEN:-}}
       # 同一枚内部令牌供心潮 HTTP API 鉴权和 OB sidecar 反向读取。
       - SERVICE_TOKEN=${DYNAMIC_MIND_TOKEN}
     networks:

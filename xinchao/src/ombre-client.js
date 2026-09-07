@@ -1,5 +1,8 @@
 import { SYSTEM_VERSION } from './version.js';
 
+// 梦不吃技术：这些域的记忆不进梦的原料（机房梦就是这么来的）
+const DREAM_EXCLUDE_DOMAINS = new Set(['技术', '数字', '编程', '事务']);
+
 export class OmbreClient {
   constructor(config) {
     this.config = config;
@@ -28,7 +31,7 @@ export class OmbreClient {
   }
 
   async initialize() {
-    if (this.sessionId) return;
+    if (this.sessionId || this.stateless) return;
     if (!this.initializePromise) {
       this.initializePromise = (async () => {
         await this.post({
@@ -45,6 +48,7 @@ export class OmbreClient {
         // session header; stateful MCP servers still keep working when they
         // return one.  The request method already adds the header only when
         // present, so both transports can share the same client.
+        this.stateless = !this.sessionId;
         await this.post({ jsonrpc: '2.0', method: 'notifications/initialized' }, false);
       })().finally(() => { this.initializePromise = null; });
     }
@@ -57,8 +61,9 @@ export class OmbreClient {
       try {
         return await this.post({ jsonrpc: '2.0', id: Date.now(), method: 'tools/call', params: { name, arguments: args } }, true, timeoutMs);
       } catch (error) {
-        if (attempt || !/HTTP (400|404)/.test(error.message)) throw error;
+        if (attempt || !/HTTP (400|401|404)/.test(error.message)) throw error;
         this.sessionId = null;
+        this.stateless = false;
       }
     }
     throw new Error('Ombre MCP call failed after session refresh');
@@ -88,18 +93,20 @@ export class OmbreClient {
         return raw?.result?.tools ?? raw?.tools ?? [];
       } catch (error) {
         this.sessionId = null;
+        this.stateless = false;
         if (attempt) throw error;
       }
     }
     return [];
   }
 
-  async recentMaterial(drives = []) {
-    return (await this.recentMaterialWithRefs(drives)).text;
+  async recentMaterial(drives = [], emotion = null) {
+    return (await this.recentMaterialWithRefs(drives, emotion)).text;
   }
 
-  async recentMaterialWithRefs(drives = []) {
+  async recentMaterialWithRefs(drives = [], emotion = null) {
     const result = await this.call('breath', {
+      ...emotionArgs(emotion),
       query: withDriveHint('近期重要记忆、情绪、关系变化和未完成事项', drives),
       max_results: this.config.breathMaxResults,
       max_tokens: this.config.breathMaxTokens
@@ -107,12 +114,13 @@ export class OmbreClient {
     return materialWithRefs(extractText(result), 10000);
   }
 
-  async daytimeMaterial(drives = []) {
-    return (await this.daytimeMaterialWithRefs(drives)).text;
+  async daytimeMaterial(drives = [], emotion = null) {
+    return (await this.daytimeMaterialWithRefs(drives, emotion)).text;
   }
 
-  async daytimeMaterialWithRefs(drives = []) {
+  async daytimeMaterialWithRefs(drives = [], emotion = null) {
     const result = await this.call('breath', {
+      ...emotionArgs(emotion),
       query: withDriveHint('白天自然浮现的近期记忆、具体细节、未说完的话和当下牵挂；不要返回系统配置或技术信息', drives),
       max_results: this.config.breathMaxResults,
       max_tokens: this.config.breathMaxTokens
@@ -121,12 +129,13 @@ export class OmbreClient {
   }
 
   // 自主念头用的材料：比日间浮现更短，只要能让念头落到具体的事上。
-  async thoughtMaterial(drives = []) {
-    return (await this.thoughtMaterialWithRefs(drives)).text;
+  async thoughtMaterial(drives = [], emotion = null) {
+    return (await this.thoughtMaterialWithRefs(drives, emotion)).text;
   }
 
-  async thoughtMaterialWithRefs(drives = []) {
+  async thoughtMaterialWithRefs(drives = [], emotion = null) {
     const result = await this.call('breath', {
+      ...emotionArgs(emotion),
       query: withDriveHint('此刻自然想起的一件具体的事：最近的共同经历、说过的话或还惦记着的东西；不要返回系统配置、部署或技术信息', drives),
       max_results: Math.max(1, Math.min(3, Number(this.config.breathMaxResults) || 2)),
       max_tokens: Math.max(200, Math.min(600, Number(this.config.breathMaxTokens) || 400))
@@ -134,8 +143,47 @@ export class OmbreClient {
     return materialWithRefs(extractText(result), 4000);
   }
 
-  async recentContinuityMaterial(maxTokens = this.config.breathMaxTokens) {
+  // 梦的原料（3.3）：OB 的 dream 是"最近 N 小时有变动的记忆全量"——记忆正在被消化的东西。
+  // 按桶拆开，去掉技术/事务类，保留主题、情感坐标和正文，封顶 maxChars。
+  async digestMaterial(windowHours = 48, { maxChars = 5000, maxBuckets = 8, exclude = DREAM_EXCLUDE_DOMAINS } = {}) {
+    const result = await this.call('dream', { window_hours: windowHours }, 30000);
+    const text = extractText(result);
+    const blocks = text.split(/\n---\n/).map((b) => b.trim()).filter((b) => /^\[/.test(b));
+    const picked = [];
+    for (const block of blocks) {
+      const head = block.split('\n')[0];
+      const domains = ((head.match(/主题[:：]\s*([^\s]+)/) || [])[1] || '').split(/[,，]/).filter(Boolean);
+      if (domains.some((d) => exclude.has(d))) continue;
+      const id = (block.match(/^ID:\s*([a-f0-9]+)/m) || [])[1] || null;
+      const va = head.match(/V(-?[\d.]+)\/A(-?[\d.]+)/);
+      const body = block.split('\n').slice(1).filter((l) => !/^ID:|^👣|^↳/.test(l)).join('\n').trim();
+      if (!body) continue;
+      picked.push({ id, domains, valence: va ? Number(va[1]) : null, arousal: va ? Number(va[2]) : null, text: body.slice(0, 900) });
+      if (picked.length >= maxBuckets) break;
+    }
+    let out = '';
+    for (const item of picked) {
+      const line = `[domain:${item.domains.join(',')}]${item.valence != null ? ` [情感:V${item.valence}/A${item.arousal}]` : ''}\n${item.text}\n\n`;
+      if (out.length + line.length > maxChars) break;
+      out += line;
+    }
+    return { text: out.trim(), bucketIds: picked.map((p) => p.id).filter(Boolean), domains: [...new Set(picked.flatMap((p) => p.domains))], total: blocks.length, kept: picked.length };
+  }
+
+  // 一条远期的小事：让梦有可以跳跃的另一头。30 天以前，只要一条。
+  async farMaterial(now = new Date()) {
+    const dateTo = new Date(now.getTime() - 30 * 86_400_000).toISOString().slice(0, 10);
+    // OB 3.6：日期过滤只在 breath_advanced 上（公开 breath 不收 date_to）
+    const result = await this.call('breath_advanced', {
+      query: '很久以前的一件具体的小事，有画面、有身体感；不要系统配置或技术信息',
+      max_results: 1, max_tokens: 1200, date_to: dateTo, with_ids: true,
+    });
+    return materialWithRefs(extractText(result), 1500);
+  }
+
+  async recentContinuityMaterial(maxTokens = this.config.breathMaxTokens, emotion = null) {
     const result = await this.call('breath', {
+      ...emotionArgs(emotion),
       query: [
         '新窗口近期连续性：只返回最近发生了什么，以及仍直接影响现在的人物与关系变化、生活重点和未完成约定。',
         '不要返回核心准则、自我基岩或长期画像；这些由客户端从自己的核心指令和长期记忆单独完整读取。',
@@ -242,7 +290,7 @@ export class OmbreClient {
   async storeHeldOutput(item) {
     if (!this.config.writeEnabled) throw new Error('ombre_write_disabled');
     const content = String(item?.content ?? '').trim();
-    if (!content) throw new Error('pending_content_empty');
+    if (!content) throw new Error('box_content_empty');
     // Ombre v3.6.3 rejects legacy source/auto fields; grow only accepts its
     // documented content/items/test_data contract.
     const result = await this.call('grow', {
@@ -252,6 +300,15 @@ export class OmbreClient {
     const bucketId = parseGrowBucketIds(text)[0] ?? null;
     if (!bucketId) throw new Error('ombre_grow_missing_bucket_id');
     return bucketId;
+  }
+
+  // 自我觉察确认后写进 OB 的 I（候选桶，之后由 dream 见证升正式条目）。只在写开关打开时可用。
+  async writeSelfAwareness(content, aspect = 'patterns') {
+    if (!this.config.writeEnabled) throw new Error('ombre_write_disabled');
+    const text = String(content ?? '').trim();
+    if (!text) throw new Error('awareness_content_empty');
+    const result = await this.call('I', { content: text, aspect: String(aspect || 'patterns') });
+    return extractText(result).slice(0, 600);
   }
 
   // 只用 OB 已有 trace 记一条来源关系；不改正文、不强制 anchor、不新增 OB 写能力。
@@ -306,6 +363,15 @@ export class OmbreClient {
 // （要有原句、词锚或高语义证据）。所以驱动力高不会凭空造出记忆，只会让
 // 本来就有证据的那几条里，跟当下状态相关的先浮上来。末尾那句兜底很重要，
 // 没有它的话强驱动力会把召回卡死成空。
+// 情绪 → 记忆：把此刻情绪坐标交给 breath 做共振排序（OB 没坐标时给中性分 0.5，有坐标就按距离算）。
+function emotionArgs(emotion) {
+  if (!emotion) return {};
+  const v = Number(emotion.valence);
+  const a = Number(emotion.arousal);
+  if (!Number.isFinite(v) || !Number.isFinite(a)) return {};
+  return { valence: Number(Math.max(0, Math.min(1, v)).toFixed(4)), arousal: Number(Math.max(0, Math.min(1, a)).toFixed(4)) };
+}
+
 function withDriveHint(base, drives) {
   const labels = (Array.isArray(drives) ? drives : [])
     .filter((item) => Number(item?.value) >= DRIVE_HINT_MIN)

@@ -8,7 +8,7 @@ export const SATURATE_FLOOR = 0.65;
 // 每个驱力的「静息天花板」：没有事件、共振或回流时，时间地板把它托到这个高度就停。
 // 关系类（想她/惦记/馋）自然浮得高——她不在时想念本就该涨；杂类（好奇/无聊/责任）低。
 // 被事件/回流顶到天花板之上后，会慢慢松弛回各自的 ceil，而不是所有维度一起爬到 0.80。
-// 这一版是顾川的底色情绪谱，先跑，看真实曲线再调（小雨 2026-08-07 定：先跑）。
+// 这一版是默认的底色情绪谱，先跑，看真实曲线再调（2026-08-07 定：先跑）。
 export const DIMENSIONS = Object.freeze({
   possess: {
     label: '想她、占有与靠近',
@@ -91,6 +91,8 @@ export const DIMENSIONS = Object.freeze({
   grieve: {
     label: '难过与失落',
     growPerHour: 0,
+    // 3.3：没有增长项的情绪型驱力自己往 0 回落（半衰期 24h）；此前初始 0.15 就永远 0.15，一直拽着情绪回落目标
+    decayHalfLifeHours: 24,
     ceil: 0.15,
     satisfyMul: 0.60,
     dawnFreeze: false,
@@ -98,6 +100,8 @@ export const DIMENSIONS = Object.freeze({
   anger: {
     label: '生气与不满',
     growPerHour: 0,
+    // 3.3：没有增长项的情绪型驱力自己往 0 回落（半衰期 24h）；此前初始 0.15 就永远 0.15，一直拽着情绪回落目标
+    decayHalfLifeHours: 24,
     ceil: 0.15,
     satisfyMul: 0.40,
     dawnFreeze: false,

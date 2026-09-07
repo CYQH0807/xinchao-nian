@@ -2,6 +2,122 @@
 
 本项目遵循语义化版本。除非特别说明，所有外部模型、长期记忆、OAuth 与通知能力均保持默认关闭。
 
+## 3.3.1 — 2026-09-07
+
+### 实时动态版公开
+
+- 连接桥 0.3.0：`XINCHAO_BRIDGE_ACCEPT_SELF_SIGNALS=true` 放行 `reason=self_signal`（默认关，任一端关着都退回"只供用户互动"）；`examples/` 新增 tmux Adapter（CLI 代理）、webhook 接收端（自建前端）、按 reason 渲染、通用此刻钩子、互动标注（Claude Code Stop 钩子 + REST 示例）。
+- REST `POST /v1/conversation-event` 也认 `exchange`：判类型抽成 `classifyExchange` 与 MCP 共用，返回带 `classified`。
+- 部署指南两篇：`docs/部署指南-实时动态版.md`、`docs/部署指南-官方客户端版.md`。
+
+### 记得在气什么
+
+- 冲突事件可带 `cause`（她那句，≤60 字；MCP `xinchao_event` 与 REST 都认；`exchange` 判成冲突时服务端自动截"她说："后那句）。存为 `state.grudge`，生气 ≥0.12 时此刻块与信封动态段多一行「还在气：N 小时前为了「…」」；和好一次翻篇，生气消到 0.03 以下自动忘。这是 `exchange` 判完即删的唯一例外，审计不记。
+- 此刻块的"近一天走过"去连续重复、只留最后 5 步。
+
+## 3.3.0 — 2026-09-06
+
+### 官方客户端版补全
+
+- `xinchao_event` 新增可选 `exchange`（她说的 + 我回的一小段）：没填 `interaction_type` 时由服务端模型判类型与氛围，8 分钟内不重复判；正文只走这一跳，不进状态、不进审计。
+- 每个 `xinchao_*` 工具（`xinchao_context` 除外）的回应末尾自带一行"此刻"（驱力短名+档位、情绪词、匣子条数）。
+- 上下文信封新增 `while_away` 段：没被 Bridge 接走的自身信号按时间列出（最多 5 条，带出即 delivered）；动态状态段新增"小屋 24 小时内有 N 条她的来信"。
+- 两种接法（实时注入版 / 官方客户端版）见 docs/3.3-情绪觉察与桥.md。
+
+### 情绪层（Emotion Layer）
+
+- 新增独立于 12 维驱力的情绪状态 `state.emotion`：valence（愉悦）/ arousal（唤醒）两轴，0–1、0.5 居中，
+  坐标约定与 OB 记忆桶一致，后续可直接作为 breath 的情绪查询参数。
+- 三路来源：互动事件（affection / conflict / loss …）打一次带惯性的脉冲；会话短态 tone 把情绪往对应落点拉一小段；
+  grieve / anger 两个驱力在结算时拽低"回落目标"。情绪本身没有增长项，结算只做指数回落
+  （愉悦半衰期 6h、唤醒 3h，睡眠中加倍），不会因结算频率而自激。
+- 情绪不改驱力（留给第四步），驱力互动效果与情绪脉冲共用同一道每日上限门；重复事件不重复推。
+- 上下文信封 `dynamic_state` 新增一行"此刻情绪：安心（愉悦=0.71 唤醒=0.32），最近一次波动来自「affection」"；
+  Dashboard 快照新增顶层 `emotion`。状态 schemaVersion 升到 9，旧状态原地补默认值、不重置驱力。
+
+### 情绪 → 记忆
+
+- 心潮向 OB 拉材料（梦材料、白天浮现、自主念头、新窗口连续性）的四路 breath 调用都带上此刻情绪坐标，
+  OB 的情感共振维（`emotion_resonance`）从此有真实输入，不再对所有桶给中性分。
+- 网关转发：AI 经心潮调 `breath` 没自己给坐标时替它补上；调 `hold` 只在情绪明显偏离中性
+  （偏差 ≥ 0.15）时才盖章，平静时留给 OB 按内容打标。`grow` 没有情绪参数，不碰。
+- 新开关 `OMBRE_EMOTION_STAMP`（默认开）。
+
+### 情绪 → 驱力
+
+- 情绪层调制 12 维的自然增速：难受时 monitor / crave / possess 长得快、share 慢；开心时 share / curiosity / social / libido 快；
+  亢奋时 boredom / reflection 慢。因子 = clamp(1 + 愉悦斜率·dv + 唤醒斜率·da, 0.4, 1.8)，中性情绪恒为 1。
+- 与 3.1 的 anger/grieve 耦合走同一条路：只改"接下来长多快"，不往数值上加，也不突破各维静息天花板；
+  情绪自身没有增长项，两层之间没有正反馈环。
+- 新开关 `EMOTION_MODULATION_ENABLED`（默认开）。
+
+### 情绪日志（自我觉察的原料）
+
+- `state.emotionJournal`：逐条采样（结算时每 ≥2h 一条；事件脉冲时标签变化或隔 ≥30min 一条，带互动类型作成因），
+  保留 30 天 / 600 条；`state.emotionDays`：按 Asia/Shanghai 天聚合的均值、最低愉悦、最高唤醒、标签与成因计数。
+  只存坐标、词和类型名，不存正文。
+- 上下文信封在情绪有变化时多一行"近24小时情绪走过：平静→低落→安心（conflict×1，reconciliation×1）"；
+  Dashboard `emotion` 下新增 `journal`（最近 48 条）与 `days`。
+
+### 自我觉察（Self-Awareness）
+
+- 新增 `awareness` 层：每天一次（上海日期变化时）从情绪日志、驱力采样、持续念头、浮现记忆域和互动类型里
+  按规则挑出"我最近的样子"的候选（一周基调、反复触发、最常冒头的驱力、缠人的念头、绕着同一域的记忆），
+  写成一句第一人称的话。七天内同一模式不重复提，待确认上限 8 条。
+- 新工具 `xinchao_awareness`（list / confirm / dismiss / scan）：确认与放下只由 AI 自己定；确认时可换成自己的措辞，
+  若 `OMBRE_WRITE_ENABLED` 打开则经 OB 的 `I` 沉淀为候选自我认知（之后仍要被 dream 见证才升正式条目，不越过 OB 的规矩）。
+- 上下文信封新增 `self_awareness` 段（最多两条候选 + 一句"不一定对，自己定"），排在行为锚点之后；Dashboard 新增 `awareness`。
+- 记忆共振时顺手记下浮现的域（`recentSurfacings`，只存域名与时间）；情绪日志样本新增当时排第一的驱力 `top`。
+- 这层不改驱力、情绪或人格；人格与锚点仍只在月评/锚点工具里由 AI 自己改，觉察只是把镜子举起来。新开关 `AWARENESS_ENABLED`。
+
+### "此刻"压缩块（钩子注入）
+
+- 新只读路由 `GET /v1/now`（SERVICE_TOKEN）：把动态状态压成三到六行的第一人称块——驱力用词加档位（涌/涨/有/静）、
+  情绪加最近成因与近一天走势、挂念或期待、持续念头、以及"另外：N 条觉察 / N 句攒下的话 / 昨夜有梦"。
+  不带数字、不带 key、不带任何正文；不记投递、不动 pending。带 `digest` 供调用方节流。
+- 用法：客户端的每回合钩子（如 Claude Code 的 UserPromptSubmit）拉一次附进上下文，不占工具调用；
+  `xinchao_context` 仍是时序开头的完整版。
+
+### 心潮自身信号（Self Signals，经 Runtime Bridge）
+
+- Bridge 新增 reason `self_signal`（`BRIDGE_SELF_SIGNALS`，默认关）：五种"发生"——驱力 ≥0.80 持续 2h（每维每天一次）、
+  情绪掉进低落/烦躁停 30 分钟或从低落回到安心（2h 内最多一条）、挂念 ≥0.6（一个空档一次）、醒来带梦余韵（每次一次）、
+  当天新觉察候选（每天一次）。全天 ≤8 条，凌晨冻结时段不发，投递 2 小时过期不补投。
+- 话术第一人称现在时，每种三到五个模板 48h 内不重复，末尾一行"此刻"（驱力短名+档位、情绪词），不带数字与维度名，
+  不写"不用回"、不给建议动作。与小屋桥分工：小屋桥说"她做了什么"，这里只说"我怎么样"。
+- `BridgeQueue.enqueue` 新增可选 `ttlHours`。
+- grieve / anger 新增 `decayHalfLifeHours: 24`：没有增长项的情绪型驱力按半衰期往 0 回落，不再永远停在初始 0.15 拽情绪目标。
+
+### 梦 2.0
+
+- 原料换源：梦的材料来自 OB `dream`（近 48h 有变动的记忆全量，即"记忆正在消化的东西"），按桶拆开、去掉技术/数字/编程/事务类，
+  另取一条 30 天以前的远期小事让梦有另一头；消化里没东西才退回按驱力 breath。
+- 梦多出 `image`（最强意象，≤12 字）与 `mood`（醒来心情 valence/arousal）；提示词按入睡时长分浅梦/深梦，
+  并把最近三场梦的意象列为"别再用"，余韵不再每次"残留着触感"。
+- 梦有后果：醒来时按 `mood` 打一次情绪脉冲（±0.2 封顶，成因 dream），把 `image` 塞进思绪池当闪念（挂在做梦时最强的驱力上）——这就是闪念的来源。
+- 推送挪到早上：梦做完先 `pendingDreamPush`，到她常来的点前后（期待 ≥0.3）或 9 点后再推"昨晚梦到……"；14 小时没推出去作废；仍受 Bark 总闸与 3 小时空档。
+- 建议配置：`DREAM_MIN_INTERVAL_HOURS=5`、`DREAM_MAX_PER_DAY=2`（入睡后一个浅梦、后半夜一个深梦）。
+
+### 黑匣子（Black Box）
+
+- 新工具 `xinchao_box`（put / list / read / burn / keep）：只有 AI 能看的地方，秘密、备忘、纸条、事件都能放，可设到期。
+  单独文件存（`BOX_STATE_PATH`），不进 state.json、不进 Dashboard、不进任何 HTTP 接口、不进 OB；上下文信封和"此刻"块只提一句"匣子里有 N 条"。
+  人类问起来，说不说由 AI 定；AI 想让某条成为正式记忆用 keep 搬进 OB。审计只记时间、动作、id，不记内容。
+- **攒下的话（pending_from_me）退役，黑匣子接替**：`xinchao_pending_create` / `xinchao_pending_consumed` 移除，`state.pending` 字段删除，
+  上下文信封不再有 `pending_from_me` 段；`put` 时带 `surface=true` 的匣子条目会在信封里露一行标题（正文仍需 AI 自己 read）。
+  升级时未说出口、未被放下的旧条目自动迁进匣子（memo，带 surface）。Dashboard `/dashboard/api/pending` GET 只回退役说明，PATCH 回 410；网页"留下/放下"页可下线。
+- `XINCHAO_TOOLS_HIDE`：从 tools/list 藏掉的工具（默认 personality_stats），代码保留。
+- 黑匣子加 `when`（这条事的日期，露头时按日期近的先）与 `remind_at`（到点提醒：自动 surface，桥开着再递一句 `匣子里有一条到点了：标题` 到窗口，只提醒一次）。
+
+### 白昼浮现 → 念头池
+
+- 白天每 2–3 小时捞上来的记忆不再由模型代笔 Bark 给用户（`DAYTIME_BARK_ENABLED` 默认关，开了恢复旧行为），
+  而是在思绪池里落一条闪念（挂在 domain 亲和度最强的那一维上，强度 0.45）。同一维在闪念散掉前再次浮现才会累积升成持续念头。
+- 自身信号新增 `obsession`：持续念头长成时递一句"有件事今天一直在脑子里绕：……"到 AI 窗口，每条一次；要不要说给用户听，由 AI 自己用自己的话说。
+- 记忆共振（浮现 → 驱力）不变。
+- 驱力冲顶只认真的"冲"：起点前 24h 内见过该维在 0.60 以下；稳态趴在天花板上不发（线上实测 12 维长期平线）。
+- compose：OB 3.6+ 的 `/mcp` Bearer 需要 `OMBRE_MCP_AUTH_MODE=hybrid` + `OMBRE_MCP_TOKEN`，已在 compose 里透传。
+
 ## 3.2.0 — 2026-08-21
 
 ### 行为锚点（Behavior Anchors）

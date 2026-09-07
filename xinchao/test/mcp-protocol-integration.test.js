@@ -30,10 +30,11 @@ test('tools/list keeps Xinchao, board and curated OB tools together', async () =
   });
   const names = result.body.result.tools.map((tool) => tool.name);
   assert.ok(names.includes('xinchao_context'));
-  assert.ok(names.includes('xinchao_pending_create'));
-  assert.ok(names.includes('xinchao_pending_consumed'));
   assert.ok(names.includes('xinchao_hold_status'));
   assert.ok(names.includes('xinchao_hold_retry'));
+  assert.ok(names.includes('xinchao_box'));
+  assert.equal(names.includes('xinchao_pending_create'), false);
+  assert.equal(names.includes('xinchao_pending_consumed'), false);
   assert.ok(names.includes('xinchao_personality_reflect'));
   assert.equal(names.includes('xinchao_pending_hold'), false);
   assert.equal(names.includes('xinchao_pending_drop'), false);
@@ -115,33 +116,6 @@ test('AI can submit one complete monthly personality reflection through MCP', as
   assert.equal(received.dimensions.length, 14);
 });
 
-test('AI may create and acknowledge pending output but cannot choose user disposition', async () => {
-  let created;
-  let consumed;
-  const handlers = {
-    pendingCreate: async (input) => {
-      created = input;
-      return { item: { id: 'pending_1', ...input }, duplicate: false, revision: 2 };
-    },
-    pendingConsumed: async (input) => {
-      consumed = input;
-      return { consumed: input.ids, revision: 3 };
-    },
-  };
-  const createResult = await handleMcpMessage(request('tools/call', {
-    name: 'xinchao_pending_create',
-    arguments: { kind: 'share', content: '下午翻到一件想等她回来说的事。', source_ombre_bucket_ids: ['bucket_a'] },
-  }), handlers);
-  assert.equal(createResult.body.result.isError, false);
-  assert.deepEqual(created.sourceOmbreBucketIds, ['bucket_a']);
-
-  const consumedResult = await handleMcpMessage(request('tools/call', {
-    name: 'xinchao_pending_consumed', arguments: { ids: ['pending_1'] },
-  }), handlers);
-  assert.equal(consumedResult.body.result.isError, false);
-  assert.deepEqual(consumed.ids, ['pending_1']);
-});
-
 test('OB failure does not remove Xinchao or board tools', async () => {
   const result = await handleMcpMessage(request('tools/list'), {
     boardEnabled: true,
@@ -151,4 +125,23 @@ test('OB failure does not remove Xinchao or board tools', async () => {
   assert.ok(names.includes('xinchao_event'));
   assert.ok(names.includes('board_post'));
   assert.ok(names.includes('board_read'));
+});
+
+test('hidden tools disappear from tools/list', async () => {
+  const result = await handleMcpMessage(request('tools/list'), { toolsHide: new Set(['xinchao_pending_create']) });
+  const names = result.body.result.tools.map((tool) => tool.name);
+  assert.ok(names.includes('xinchao_box'));
+  assert.ok(!names.includes('xinchao_pending_create'));
+});
+
+test('xinchao_* tool replies carry a trailing now-line; xinchao_context does not', async () => {
+  const handlers = {
+    nowLine: async () => '此刻：想她（涌）；情绪 安心',
+    handoffNote: async () => ({ revision: 3, duplicate: false }),
+    context: async () => ({ delivered: true, additionalContext: 'ctx', sections: [] }),
+  };
+  const note = await handleMcpMessage(request('tools/call', { name: 'xinchao_handoff_note', arguments: { event_id: 'evt-000001', note: 'x', session_id: 's' } }), handlers);
+  assert.match(note.body.result.content[0].text, /此刻：想她（涌）/);
+  const ctx = await handleMcpMessage(request('tools/call', { name: 'xinchao_context', arguments: { session_id: 's' } }), handlers);
+  assert.doesNotMatch(ctx.body.result.content[0].text, /此刻：/);
 });

@@ -55,8 +55,10 @@ export function loadConfig() {
       writeEnabled: bool('OMBRE_WRITE_ENABLED', false),
       breathMaxResults: number('OMBRE_BREATH_MAX_RESULTS', 3, 1, 10),
       breathMaxTokens: number('OMBRE_BREATH_MAX_TOKENS', 800, 200, 3000),
+      // 3.3：把此刻情绪坐标带给 breath（共振排序）和没自带坐标的 hold（情感标签）。
       holdTimeoutMs: number('OMBRE_HOLD_TIMEOUT_MS', 120000, 5000, 300000),
       holdQueuePollSeconds: number('OMBRE_HOLD_QUEUE_POLL_SECONDS', 2, 1, 60),
+      emotionStamp: bool('OMBRE_EMOTION_STAMP', true),
     },
     context: {
       enabled: bool('CONTEXT_ENVELOPE_ENABLED', true),
@@ -104,7 +106,15 @@ export function loadConfig() {
       maxEntries: number('BRIDGE_MAX_ENTRIES', 500, 10, 5000),
       ttlHours: number('BRIDGE_TTL_HOURS', 168, 1, 720),
       pollSeconds: number('BRIDGE_POLL_SECONDS', 15, 2, 300),
+      // 3.3：心潮自身信号（驱力冲顶/情绪转折/挂念/醒来余韵/觉察）经桥递到 AI 窗口。默认关。
+      selfSignals: bool('BRIDGE_SELF_SIGNALS', false),
     },
+    // 黑匣子（3.3）：只有 AI 能看的地方；单独文件，不进 state.json / Dashboard / 备份
+    box: {
+      statePath: process.env.BOX_STATE_PATH ?? '/app/state/black-box.json',
+    },
+    // 从 tools/list 里藏掉的工具（代码保留）。stats 是给 Dashboard 的。
+    toolsHide: new Set(String(process.env.XINCHAO_TOOLS_HIDE ?? 'xinchao_personality_stats').split(',').map((s) => s.trim()).filter(Boolean)),
     cabin: {
       statePath: process.env.CABIN_STATE_PATH ?? '/app/state/cabin.json',
       maxNotes: number('CABIN_MAX_NOTES', 2000, 10, 10000),
@@ -140,6 +150,12 @@ export function loadConfig() {
         ? number('SATIETY_HOURS', 2, 0, 24)
         : number('SATISFACTION_PLATEAU_HOURS', 2, 0, 24),
       couplingEnabled: bool('DRIVE_COUPLING_ENABLED', true),
+      // 3.3：情绪层调制驱力自然增速（难受更惦记、开心更想分享）。只改增速不加数值。
+      emotionModulationEnabled: bool('EMOTION_MODULATION_ENABLED', true),
+    },
+    // 3.3 自我觉察：每天一次从轨迹里挑候选；确认后是否写 OB 的 I 取决于 OMBRE_WRITE_ENABLED。
+    awareness: {
+      enabled: bool('AWARENESS_ENABLED', true),
     },
     daytime: {
       enabled: bool('DAYTIME_EMERGENCE_ENABLED', false),
@@ -148,7 +164,9 @@ export function loadConfig() {
       endHour: number('DAYTIME_END_HOUR', 23, 1, 24),
       minIntervalHours: number('DAYTIME_MIN_INTERVAL_HOURS', 2, 0.25, 24),
       maxIntervalHours: number('DAYTIME_MAX_INTERVAL_HOURS', 3, 0.25, 24),
-      maxPerDay: number('DAYTIME_MAX_PER_DAY', 7, 1, 24)
+      maxPerDay: number('DAYTIME_MAX_PER_DAY', 7, 1, 24),
+      // 3.3：默认不再让模型代笔 Bark 给她；浮现的记忆进念头池，反复浮现长成持续念头后经自身信号递给 AI，说不说由 AI 自己定
+      bark: bool('DAYTIME_BARK_ENABLED', false),
     },
     // 输出回流：他说出口的自主表达回过头在思维池里留痕。默认开——闭环的第一块。
     reflux: {
