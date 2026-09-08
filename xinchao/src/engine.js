@@ -11,7 +11,7 @@ const clamp = (value, min = 0, max = 1) => Math.max(min, Math.min(max, value));
 const CEIL_RELAX_PER_HOUR = 0.10;
 // 记忆共振只回推亲和度够强的维度，弱关联不动（沿用规格 onRecall 的 >0.5 门槛）。
 const RESONANCE_MIN_AFFINITY = 0.5;
-// 作息预期：她隔了一段时间后再出现才算"一次到来"计入节律；心跳不算。旧节律每次到来轻微衰减，自适应。
+// 作息预期：对方隔了一段时间后再出现才算"一次到来"计入节律；心跳不算。旧节律每次到来轻微衰减，自适应。
 const ARRIVAL_GAP_MINUTES = 90;
 const ARRIVAL_DECAY = 0.99;
 const iso = (value) => new Date(value).toISOString();
@@ -165,7 +165,7 @@ function applyInteractionOutcome(state, type, now, options = {}) {
     state.drives[key] = Number(clamp(current + clamp(Number(increase), 0, 0.12)).toFixed(4));
     affected.add(key);
   }
-  // 3.3.1 记得在气什么：冲突时把她那句留下来（≤60 字，随生气一起退），和好就翻篇。
+  // 3.3.1 记得在气什么：冲突时把对方那句留下来（≤60 字，随生气一起退），和好就翻篇。
   // 以前生气只是个数字，他知道自己在气却不知道为什么。
   if (type === 'conflict' && options.cause) {
     const cause = String(options.cause).replace(/\s+/g, ' ').trim().slice(0, 60);
@@ -605,8 +605,8 @@ export function applyConversationEvent(input, event = {}, now = new Date(), opti
     }
   }
 
-  // 作息预期：记下"她这个点来了"。只在真实会话事件（非心跳）且隔了一段时间后计入，
-  // 让直方图学的是"她通常什么时候出现"，不是一次长聊里的每条消息。
+  // 作息预期：记下"对方这个点来了"。只在真实会话事件（非心跳）且隔了一段时间后计入，
+  // 让直方图学的是"对方通常什么时候出现"，不是一次长聊里的每条消息。
   if (options.recordArrival) {
     const prevMs = Date.parse(input.lastConversationAt);
     const gapMinutes = Number.isFinite(prevMs) ? (now.getTime() - prevMs) / 60_000 : Infinity;
@@ -789,10 +789,10 @@ export function activeSessionOverlay(input, sessionId, now = new Date()) {
 }
 
 // ── Anticipation (作息预期) ────────────────────────────────────────
-// 从她真实到达的节律直方图里，算出此刻"她差不多该来了"的期待感（0-1）。
-// 派生值，不落状态——用到时现算。三重克制：数据太少不臆测；她的静默时段（此刻几乎从不来，
-// 多半在睡）返回 0，不做"她怎么还不来"的等待；刚聊过（idle 短）也不期待，已兑现。
-// 过了她的高峰时段而她没来，relative 自然回落，期待安静地淡掉，绝不升级成责备。
+// 从对方真实到达的节律直方图里，算出此刻"对方差不多该来了"的期待感（0-1）。
+// 派生值，不落状态——用到时现算。三重克制：数据太少不臆测；对方的静默时段（此刻几乎从不来，
+// 多半在睡）返回 0，不做"对方怎么还不来"的等待；刚聊过（idle 短）也不期待，已兑现。
+// 过了对方的高峰时段而对方没来，relative 自然回落，期待安静地淡掉，绝不升级成责备。
 export function computeAnticipation(state, now = new Date(), options = {}) {
   const tz = options.timeZone ?? 'Asia/Shanghai';
   const hist = Array.isArray(state.arrivalHistogram) ? state.arrivalHistogram : [];
@@ -805,17 +805,17 @@ export function computeAnticipation(state, now = new Date(), options = {}) {
   let peak = 0;
   for (let h = 0; h < 24; h += 1) peak = Math.max(peak, windowAt(h));
   if (peak <= 0) return 0;
-  const relative = windowScore / peak; // 0-1：此刻离她高峰到达时段多近
-  if (relative < (options.quietGate ?? 0.15)) return 0; // 她的静默时段：她在睡，别等
+  const relative = windowScore / peak; // 0-1：此刻离对方高峰到达时段多近
+  if (relative < (options.quietGate ?? 0.15)) return 0; // 对方的静默时段：对方在睡，别等
   const prevMs = Date.parse(state.lastConversationAt);
   const idleH = Number.isFinite(prevMs) ? Math.max(0, (now.getTime() - prevMs) / 3_600_000) : 0;
   const idleFactor = clamp(idleH / (options.expectIdleHours ?? 3), 0, 1); // 刚聊过就不用期待
   return Number((relative * idleFactor).toFixed(3));
 }
 
-// 挂念：作息预期的另一半。她过了常来的点还没来 → 惦记，但"失落内化"——只在她本来活跃的
-// 时段念（她的静默时段多半在睡，返回 0，绝不半夜"她怎么还不来"），从 onset 起念、full 满。
-// 派生值不落状态。和 computeAnticipation 成对：期待是"她快来了"，挂念是"她久没来、我想她了"。
+// 挂念：作息预期的另一半。对方过了常来的点还没来 → 惦记，但"失落内化"——只在对方本来活跃的
+// 时段念（对方的静默时段多半在睡，返回 0，绝不半夜"对方怎么还不来"），从 onset 起念、full 满。
+// 派生值不落状态。和 computeAnticipation 成对：期待是"对方快来了"，挂念是"对方久没来、我想他了"。
 export function computeLonging(state, now = new Date(), options = {}) {
   const tz = options.timeZone ?? 'Asia/Shanghai';
   const hist = Array.isArray(state.arrivalHistogram) ? state.arrivalHistogram : [];
@@ -835,12 +835,12 @@ export function computeLonging(state, now = new Date(), options = {}) {
   for (let h = 0; h < 24; h += 1) peak = Math.max(peak, windowAt(h));
   if (peak <= 0) return 0;
   const activeness = clamp(windowAt(hour) / peak, 0, 1);
-  if (activeness < (options.quietGate ?? 0.15)) return 0; // 她这个点几乎不来（多半在睡）→ 不念
+  if (activeness < (options.quietGate ?? 0.15)) return 0; // 对方这个点几乎不来（多半在睡）→ 不念
   return Number((byIdle * activeness).toFixed(3));
 }
 
 // 把挂念落进数值：只推 monitor(惦记)，且硬顶在它的静息天花板(3A ceil)以内——
-// 绝不越顶，所以不会自激；她一回来 interaction 结算自然把它带下去。派生自 computeLonging。
+// 绝不越顶，所以不会自激；对方一回来 interaction 结算自然把它带下去。派生自 computeLonging。
 export function applyLongingNudge(input, longing = 0, now = new Date(), options = {}) {
   const state = ensureStateShape(structuredClone(input));
   const amount = clamp(Number(options.nudge ?? 0.02), 0, 0.1);

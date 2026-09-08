@@ -6,12 +6,14 @@ export const SATURATE_FLOOR = 0.65;
 // growPerHour=0 的维度自然 no-op，不做特判。
 
 // 每个驱力的「静息天花板」：没有事件、共振或回流时，时间地板把它托到这个高度就停。
-// 关系类（想她/惦记/馋）自然浮得高——她不在时想念本就该涨；杂类（好奇/无聊/责任）低。
+import { RELATION_SUBJECT } from './relationship.js';
+
+// 关系类（想他/惦记/馋）自然浮得高——对方不在时想念本就该涨；杂类（好奇/无聊/责任）低。
 // 被事件/回流顶到天花板之上后，会慢慢松弛回各自的 ceil，而不是所有维度一起爬到 0.80。
 // 这一版是默认的底色情绪谱，先跑，看真实曲线再调（2026-08-07 定：先跑）。
 export const DIMENSIONS = Object.freeze({
   possess: {
-    label: '想她、占有与靠近',
+    label: `想${RELATION_SUBJECT}、占有与靠近`,
     growPerHour: 0.105,
     ceil: 0.82,
     satisfyMul: 0.30,
@@ -20,14 +22,14 @@ export const DIMENSIONS = Object.freeze({
     // satietyHours: 2,
   },
   monitor: {
-    label: '惦记她、想知道她在做什么',
+    label: `惦记${RELATION_SUBJECT}、想知道${RELATION_SUBJECT}在做什么`,
     growPerHour: 0.090,
     ceil: 0.78,
     satisfyMul: 0.70,
     dawnFreeze: true,
   },
   crave: {
-    label: '馋她、想黏着她',
+    label: `馋${RELATION_SUBJECT}、想黏着${RELATION_SUBJECT}`,
     growPerHour: 0.060,
     ceil: 0.68,
     satisfyMul: 0.35,
@@ -135,7 +137,7 @@ export const DOMAIN_AFFINITY = Object.freeze({
   社交: { social: 0.6, share: 0.4, boredom: 0.2 },
   关系: { social: 0.5, monitor: 0.4, reflection: 0.3, possess: 0.2 },
   家庭: { grieve: 0.5, reflection: 0.4, monitor: 0.3, duty: 0.3 },
-  // —— 身心 / 健康（她的健康是他的照顾与惦记）——
+    // —— 身心 / 健康（对方的健康是他的照顾与惦记）——
   身心: { duty: 0.5, monitor: 0.4, reflection: 0.3, grieve: 0.2 },
   健康: { duty: 0.6, monitor: 0.5, grieve: 0.2 },
   饮食: { duty: 0.5, monitor: 0.4, share: 0.2 },

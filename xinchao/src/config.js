@@ -165,7 +165,7 @@ export function loadConfig() {
       minIntervalHours: number('DAYTIME_MIN_INTERVAL_HOURS', 2, 0.25, 24),
       maxIntervalHours: number('DAYTIME_MAX_INTERVAL_HOURS', 3, 0.25, 24),
       maxPerDay: number('DAYTIME_MAX_PER_DAY', 7, 1, 24),
-      // 3.3：默认不再让模型代笔 Bark 给她；浮现的记忆进念头池，反复浮现长成持续念头后经自身信号递给 AI，说不说由 AI 自己定
+      // 3.3：默认不再让模型代笔 Bark 给对方；浮现的记忆进念头池，反复浮现长成持续念头后经自身信号递给 AI，说不说由 AI 自己定
       bark: bool('DAYTIME_BARK_ENABLED', false),
     },
     // 输出回流：他说出口的自主表达回过头在思维池里留痕。默认开——闭环的第一块。
@@ -179,13 +179,13 @@ export function loadConfig() {
       nudge: number('MEMORY_RESONANCE_NUDGE', 0.02, 0.005, 0.1),
       perCallCap: number('MEMORY_RESONANCE_PER_CALL_CAP', 0.06, 0.01, 0.3)
     },
-    // 作息预期：从她真实到达的节律学习，临近她常来的时段生出"在等你"的期待感（只表达守候，不责备）。
+    // 作息预期：从对方真实到达的节律学习，临近对方常来的时段生出"在等你"的期待感（只表达守候，不责备）。
     anticipation: {
       enabled: bool('ANTICIPATION_ENABLED', true),
       arrivalGapMinutes: number('ANTICIPATION_ARRIVAL_GAP_MINUTES', 90, 15, 720)
     },
-    // 挂念：作息预期的另一半。她过了常来的点还没来 → 轻推 monitor(惦记)，硬顶在 3A 天花板内、
-    // 不自激；只在她活跃时段念，静默时段(在睡)不念。失落内化，绝不责备。
+    // 挂念：作息预期的另一半。对方过了常来的点还没来 → 轻推 monitor(惦记)，硬顶在 3A 天花板内、
+    // 不自激；只在对方活跃时段念，静默时段(在睡)不念。失落内化，绝不责备。
     longing: {
       enabled: bool('LONGING_ENABLED', true),
       nudge: number('LONGING_NUDGE', 0.02, 0.005, 0.1),

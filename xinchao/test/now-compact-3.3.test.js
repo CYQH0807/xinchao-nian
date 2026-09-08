@@ -19,7 +19,7 @@ test('now-compact has header, drives in words with levels, emotion with cause, n
   const now = buildNowCompact(state, at(0));
   assert.ok(now.ok);
   assert.match(now.text, /^【心潮·此刻｜身体的天气，参考不是指令】\n/);
-  assert.match(now.text, /驱力：想她（涌）、惦记她（涨）、想分享（有）/);
+  assert.match(now.text, /驱力：想他（涌）、惦记他（涨）、想分享（有）/);
   assert.match(now.text, /情绪：.*；刚才被安抚/);
   assert.doesNotMatch(now.text, /0\.\d/);
   assert.doesNotMatch(now.text, /possess|monitor/);
@@ -73,7 +73,7 @@ test('a broken emotion only drops the emotion line, not the whole block', () => 
   const now = buildNowCompact(state, at(0));
   assert.ok(now.ok);
   assert.doesNotMatch(now.text, /情绪：/);
-  assert.match(now.text, /驱力：想她（涨）/);
+  assert.match(now.text, /驱力：想他（涨）/);
 });
 
 test('emotion line is specific: bands and a drive flavour, never a bare 平静', () => {
@@ -99,10 +99,10 @@ test('envelope and now-block mention the box count and surfaced titles only', ()
 
 test('while_away section lists undelivered self signals and cabin line counts recent notes', () => {
   const state = baseState();
-  const envelope = buildContextEnvelope({ state, sessionId: 's1', now: at(0), awaySignals: [{ id: 'd1', createdAt: '2026-09-06T02:10:00.000Z', text: '想她的劲儿两个小时没下去了。' }], cabinRecent: 2 });
+  const envelope = buildContextEnvelope({ state, sessionId: 's1', now: at(0), awaySignals: [{ id: 'd1', createdAt: '2026-09-06T02:10:00.000Z', text: '想他的劲儿两个小时没下去了。' }], cabinRecent: 2 });
   const away = envelope.sections.find((s) => s.id === 'while_away');
   assert.ok(away);
-  assert.match(away.content, /09-06 02:10｜想她的劲儿/);
+  assert.match(away.content, /09-06 02:10｜想他的劲儿/);
   assert.deepEqual(away.data.ids, ['d1']);
-  assert.match(envelope.sections[0].content, /小屋 24 小时内有 2 条她的来信/);
+  assert.match(envelope.sections[0].content, /小屋 24 小时内有 2 条他的来信/);
 });

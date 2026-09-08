@@ -1,5 +1,6 @@
 import { SYSTEM_VERSION } from './version.js';
 import { PERSONALITY_DIMENSIONS } from './personality-store.js';
+import { RELATION_SUBJECT, relationExchangeLabels } from './relationship.js';
 
 const SUPPORTED_PROTOCOLS = new Set(['2025-03-26', '2025-06-18']);
 const INTERACTION_TYPES = new Set([
@@ -14,6 +15,7 @@ const INTERACTION_TYPES = new Set([
   'loss',
   'reconciliation',
 ]);
+const EXCHANGE_LABELS = relationExchangeLabels();
 
 // 心潮念网关：对外暴露 Ombre v3.6.3 的完整公共 MCP 面。
 // schema 在 tools/list 时动态从 OB 拉，永不漂移；You/ Them 仍遵守 OB 的持久开关。
@@ -132,7 +134,7 @@ export const XINCHAO_TOOLS = [
     description: [
       '回传一次明确的人机互动，并更新当前窗口短状态。',
       '它会先结算事件发生前的时间增长，再唤醒心潮；可用受限互动类型触发服务端固定的欲望反馈。',
-      '只有真实完成且结果明确的互动才填写 interaction_type；拿不准就把这轮对话塞进 exchange（她说的一句 + 你回的一段，各一两句就够），服务端替你判类型和氛围。',
+      `只有真实完成且结果明确的互动才填写 interaction_type；拿不准就把这轮对话塞进 exchange（${EXCHANGE_LABELS.partner}的一句 + ${EXCHANGE_LABELS.self}的一段，各一两句就够），服务端替你判类型和氛围。`,
       '客户端不能直接填写欲望数值，也不会修改 OB 长期记忆。'
     ].join(''),
     inputSchema: {
@@ -188,13 +190,13 @@ export const XINCHAO_TOOLS = [
         cause: {
           type: 'string',
           maxLength: 120,
-          description: '可选，只配合 interaction_type=conflict：她那句让你不痛快的话（≤60 字）。心潮会记着在气什么，和好或气消了自动忘。',
+          description: `可选，只配合 interaction_type=conflict：${RELATION_SUBJECT}那句让你不痛快的话（≤60 字）。心潮会记着在气什么，和好或气消了自动忘。`,
         },
         exchange: {
           type: 'string',
           minLength: 4,
           maxLength: 1500,
-          description: '可选：这轮对话的一小段（她说的 + 你回的），没填 interaction_type 时服务端据此判类型和氛围。只走这一跳，不落盘。',
+          description: `可选：这轮对话的一小段（${EXCHANGE_LABELS.partner}的 + ${EXCHANGE_LABELS.self}的），没填 interaction_type 时服务端据此判类型和氛围。只走这一跳，不落盘。`,
         },
       },
       required: ['event_id'],

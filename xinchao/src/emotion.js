@@ -12,6 +12,8 @@
 //   3. grieve / anger 两个驱力在结算时把"回落目标"往下拽——难过着的时候，平静不是平静。
 // 情绪不直接改驱力（那是第四步的事），也不自激：每次结算只做指数回落，没有增长项。
 
+import { RELATION_SUBJECT } from './relationship.js';
+
 const clamp = (value, min = 0, max = 1) => Math.max(min, Math.min(max, Number(value) || 0));
 const round4 = (value) => Number(clamp(value).toFixed(4));
 const iso = (value) => new Date(value).toISOString();
@@ -336,7 +338,7 @@ export function renderEmotionTrend(trend) {
 // 还是词不是数——给了数他会开始报数。
 const V_BANDS = [[0.38, '沉'], [0.48, '偏沉'], [0.58, '平'], [0.68, '偏暖'], [1.01, '暖']];
 const A_BANDS = [[0.18, '很松'], [0.30, '松'], [0.45, '有点起伏'], [0.62, '起伏'], [1.01, '绷着']];
-const FLAVOR = { crave: '带一点馋', libido: '身体有点想她', possess: '底下一直想她', monitor: '惦记着她', share: '有话想说', curiosity: '好奇在动', boredom: '有点闲得慌', reflection: '想安静想想', social: '想找人说话', duty: '有事压着' };
+const FLAVOR = { crave: '带一点馋', libido: `身体有点想${RELATION_SUBJECT}`, possess: `底下一直想${RELATION_SUBJECT}`, monitor: `惦记着${RELATION_SUBJECT}`, share: '有话想说', curiosity: '好奇在动', boredom: '有点闲得慌', reflection: '想安静想想', social: '想找人说话', duty: '有事压着' };
 export function emotionNuance(state, now = new Date()) {
   const summary = emotionSummary(state, now);
   const v = summary.valence; const a = summary.arousal;

@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { RELATION_SUBJECT, relationExchangeLabels } from './relationship.js';
 
 export class ModelClient {
   constructor(config) {
@@ -75,9 +76,10 @@ export class ModelClient {
     if (!this.config.enabled || !this.config.apiKey) return null;
     const text = String(exchange ?? '').trim().slice(0, 1500);
     if (!text) return null;
+    const exchangeLabels = relationExchangeLabels();
     const system = [
-      '你是一个只输出 JSON 的标注器。给你一轮对话（她说的 + 他回的，他是她的伴侣）。判断这一轮互动的类型和窗口氛围。',
-      'type 只能是：companionship 普通陪伴闲聊报备（有真实互动时的默认值）；affection 表达喜欢撒娇安抚；intimacy 身体亲密或性内容；sharing 她分享自己的一天/照片/心情；discovery 一起弄明白新东西；task_progress 一起推进了事；reflection 谈他自己是谁、内省；conflict 真实的摩擦生气（撒娇式的"讨厌""你完蛋了"不算）；loss 分别失落哭；reconciliation 吵过之后和好。',
+      `你是一个只输出 JSON 的标注器。给你一轮对话（${exchangeLabels.partner}的 + ${exchangeLabels.self}的；前者是${RELATION_SUBJECT}，后者是心潮本人）。判断这一轮互动的类型和窗口氛围。`,
+      `type 只能是：companionship 普通陪伴闲聊报备（有真实互动时的默认值）；affection 表达喜欢撒娇安抚；intimacy 身体亲密或性内容；sharing ${RELATION_SUBJECT}分享自己的一天/照片/心情；discovery 一起弄明白新东西；task_progress 一起推进了事；reflection 谈心潮自己是谁、内省；conflict 真实的摩擦生气（撒娇式的"讨厌""你完蛋了"不算）；loss ${RELATION_SUBJECT}失落哭；reconciliation 吵过之后和好。`,
       'tone 只能是 neutral calm warm guarded conflicted focused playful tired 之一；warmth、tension 是 0 到 1。',
       '只输出 {"type":"...","tone":"...","warmth":0.6,"tension":0.1}。',
     ].join('\n');

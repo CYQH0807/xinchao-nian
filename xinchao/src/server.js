@@ -28,6 +28,9 @@ import { memoryConnectionState } from './connection-diagnostics.js';
 import { PersonalityStore, computePersonalityStats } from './personality-store.js';
 import { HoldJobStore } from './hold-job-queue.js';
 import { HoldMediaStore, readBinaryBody, stageHoldMediaArgs } from './hold-media-store.js';
+import { relationExchangeLabels } from './relationship.js';
+
+const EXCHANGE_LABELS = relationExchangeLabels();
 
 // 情绪 → 记忆：只在开关打开时把此刻情绪坐标交给 OB 做共振排序。
 function emotionForOmbre(state) {
@@ -335,8 +338,8 @@ async function runCycle() {
     let barkSent = false;
     let daytimeSent = false;
 
-    // 挂念：她过了常来的点还没来 → 轻推 monitor(惦记) 进数值（不只在上下文）。
-    // applyLongingNudge 硬顶在 3A 天花板内、不自激；她的静默时段 computeLonging 返回 0，不念。
+    // 挂念：对方过了常来的点还没来 → 轻推 monitor(惦记) 进数值（不只在上下文）。
+    // applyLongingNudge 硬顶在 3A 天花板内、不自激；对方的静默时段 computeLonging 返回 0，不念。
     if (config.longing.enabled) {
       const longing = computeLonging(state, now, { timeZone: config.settle.timeZone, ...config.longing });
       const preview = longing > 0 ? applyLongingNudge(state, longing, now, config.longing) : { changed: false };
@@ -420,14 +423,14 @@ async function runCycle() {
       dreamCreated = true;
       log('dream_settled', { source: dream.source, shadow: config.shadowMode, usedBreath: Boolean(material), revision: state.revision });
 
-      // 3.3：梦做完不在凌晨推。攒着，到她常来的点前后再推"昨晚梦到……"（见下面 pendingDreamPush）。
+      // 3.3：梦做完不在凌晨推。攒着，到对方常来的点前后再推"昨晚梦到……"（见下面 pendingDreamPush）。
       if (!config.shadowMode && config.bark.enabled) {
         state = await updateState({ type: 'dream_push_pending', source: 'dream', details: { dreamId: dream.id }, at: now },
           (latest) => ({ ...latest, pendingDreamPush: { dreamId: dream.id, createdAt: now.toISOString() } }));
       }
     }
 
-    // 早上推梦：她常来的点前后（期待 ≥0.3）或 9 点之后；14 小时没推出去就作废；仍受 Bark 总闸和 3 小时空档。
+    // 早上推梦：对方常来的点前后（期待 ≥0.3）或 9 点之后；14 小时没推出去就作废；仍受 Bark 总闸和 3 小时空档。
     if (!config.shadowMode && config.bark.enabled && state.pendingDreamPush) {
       const pending = state.pendingDreamPush;
       const ageH = (now.getTime() - Date.parse(pending.createdAt)) / 3_600_000;
@@ -558,7 +561,7 @@ async function runCycle() {
             log('memory_resonance', { kind: 'daytime_emergence', domains: domains.length, revision: state.revision });
           }
         }
-        // 浮现 → 念头池：不代笔，不推她。取这次浮现的第一句当闪念，挂在最亲和的那一维上。
+        // 浮现 → 念头池：不代笔，不推对方。取这次浮现的第一句当闪念，挂在最亲和的那一维上。
         if (material.trim()) {
           const domains = parseSurfacedDomains(material);
           const key = surfacedDriveKey(domains, state);
@@ -965,12 +968,12 @@ async function createContextEnvelope({
   return ombreWarning ? { ...envelope, warnings: [ombreWarning] } : envelope;
 }
 
-// 没填类型但给了 exchange（她的一句 + 他的一段）→ 服务端替接收端判互动类型和氛围。
+// 没填类型但给了 exchange（他说的一句 + 他回的一段）→ 服务端替接收端判互动类型和氛围。
 // MCP（官方客户端版）和 REST /v1/conversation-event（自建运行时）共用；8 分钟内不重复判，和 PaiHome 钩子的节流一致。
 // exchange 正文只走这一跳：判完即删，不进状态、不进审计。
 async function classifyExchange(event, source = 'api') {
   if (event.interactionType === undefined && event.interaction_type !== undefined) event.interactionType = event.interaction_type;
-  // cause：她那句让他不痛快的话（≤60 字），只在冲突时有意义；接收端可以直接给，也可以由 exchange 里截出来
+  // cause：他说的那句让他不痛快的话（≤60 字），只在冲突时有意义；接收端可以直接给，也可以由 exchange 里截出来
   event.cause = String(event.cause ?? '').replace(/\s+/g, ' ').trim().slice(0, 60) || undefined;
   const exchange = String(event.exchange ?? '').replace(/\s+/g, ' ').trim().slice(0, 1500);
   delete event.exchange;
@@ -984,8 +987,8 @@ async function classifyExchange(event, source = 'api') {
     event.interactionType = tag.type;
     event.sessionState = { ...(event.sessionState ?? event.session_state ?? {}), tone: tag.tone, warmth: tag.warmth, tension: tag.tension };
     if (tag.type === 'conflict' && !event.cause) {
-      const her = exchange.match(/她说：(.+?)(?:\s*他回：|$)/);
-      if (her) event.cause = her[1].trim().slice(0, 60);
+      const partner = exchange.match(new RegExp(`${EXCHANGE_LABELS.partner}：(.+?)(?:\\s*${EXCHANGE_LABELS.self}：|$)`));
+      if (partner) event.cause = partner[1].trim().slice(0, 60);
     }
     await updateState({ type: 'interaction_classified', source, details: { type: tag.type, tone: tag.tone }, at: new Date() },
       (current) => ({ ...current, interactionClassifyAt: new Date().toISOString() }));
@@ -1010,7 +1013,7 @@ async function recordConversationEvent(event, source = 'api', now = new Date()) 
       sleepAfterMinutes: config.sleepAfterMinutes,
       settle: { ...config.settle, driveBias },
       interaction: config.interaction,
-      // 作息预期只从她真实的到来学习，心跳不算。
+      // 作息预期只从对方真实的到来学习，心跳不算。
       recordArrival: config.anticipation.enabled && source !== 'heartbeat',
       arrivalGapMinutes: config.anticipation.arrivalGapMinutes,
     });

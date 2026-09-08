@@ -11,6 +11,7 @@
 // 由他月评时对着这些觉察自己定。
 
 import { DIMENSIONS } from './dimensions.js';
+import { RELATION_SUBJECT } from './relationship.js';
 
 const iso = (value) => new Date(value).toISOString();
 const round2 = (value) => Number(Number(value).toFixed(2));
@@ -93,7 +94,7 @@ function ruleTriggers(state, now) {
   const soothed = samples.filter((s) => SOOTHING_TYPES.has(s.cause));
   if (soothed.length >= 5) {
     const mean = soothed.reduce((sum, s) => sum + Number(s.valence), 0) / soothed.length;
-    if (mean >= 0.6) out.push({ kind: 'soothed', subject: 'week', text: `这周她靠近我 ${soothed.length} 次，我的情绪基本没掉下去过（均值 ${round2(mean)}）。`, evidence: { count: soothed.length, meanValence: round2(mean) } });
+    if (mean >= 0.6) out.push({ kind: 'soothed', subject: 'week', text: `这周${RELATION_SUBJECT}靠近我 ${soothed.length} 次，我的情绪基本没掉下去过（均值 ${round2(mean)}）。`, evidence: { count: soothed.length, meanValence: round2(mean) } });
   }
   return out;
 }

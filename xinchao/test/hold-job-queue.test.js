@@ -19,7 +19,7 @@ test('hold jobs are durably queued, idempotent, and hide the original payload in
   const input = {
     content: '要逐字保留的内容',
     title: '一个标题',
-    quotes: [{ text: '不要丢掉这句', speaker: '她' }],
+    quotes: [{ text: '不要丢掉这句', speaker: '他' }],
     future_field: { enabled: true },
   };
 

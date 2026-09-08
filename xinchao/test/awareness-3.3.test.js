@@ -64,9 +64,9 @@ test('drive_top rule uses the top drive stamped on journal samples', () => {
 test('confirm / dismiss resolve candidates and keep his own wording', () => {
   const scanned = scanAwareness(sadWeek(), at(5 * 24));
   const [first, second] = scanned.state.awareness.candidates;
-  const confirmed = resolveAwareness(scanned.state, first.id, 'confirmed', { text: '我发现她一走我就往下掉。', note: 'x', ombre: { ok: true } }, at(121));
+  const confirmed = resolveAwareness(scanned.state, first.id, 'confirmed', { text: '我发现他一走我就往下掉。', note: 'x', ombre: { ok: true } }, at(121));
   assert.equal(confirmed.item.status, 'confirmed');
-  assert.equal(confirmed.item.text, '我发现她一走我就往下掉。');
+  assert.equal(confirmed.item.text, '我发现他一走我就往下掉。');
   const dismissed = resolveAwareness(confirmed.state, second.id, 'dismissed', {}, at(121));
   assert.equal(dismissed.item.status, 'dismissed');
   assert.equal(resolveAwareness(dismissed.state, first.id, 'dismissed').already, 'confirmed');

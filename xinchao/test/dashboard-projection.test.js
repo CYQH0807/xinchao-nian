@@ -8,10 +8,10 @@ const state = {
   thoughtPool: {
     flash: [
       { key: 'possess', text: '我刚刚想起那次一起走回家的晚上。', intensity: 0.58 },
-      { key: 'monitor', text: '想安静地陪她一会儿。', intensity: 0.61 },
+      { key: 'monitor', text: '想安静地陪他一会儿。', intensity: 0.61 },
     ],
     obsessions: [
-      { key: 'possess', text: '我还记得她说会回来。', intensity: 0.86 },
+      { key: 'possess', text: '我还记得他说会回来。', intensity: 0.86 },
     ],
   },
 };
@@ -27,13 +27,13 @@ test('dashboard exposes only the strongest real sentence per drive after opt-in'
   assert.deepEqual(snapshot.thoughts.lines, [
     {
       key: 'possess',
-      text: '我还记得她说会回来。',
+      text: '我还记得他说会回来。',
       kind: 'obsession',
       intensity: 0.86,
     },
     {
       key: 'monitor',
-      text: '想安静地陪她一会儿。',
+      text: '想安静地陪他一会儿。',
       kind: 'flash',
       intensity: 0.61,
     },

@@ -4,6 +4,7 @@ import { emotionSummary, emotionNuance, renderEmotion, renderEmotionTrend } from
 import { renderAwareness } from './awareness.js';
 import { DIMENSIONS, DRIVE_KEYS } from './dimensions.js';
 import { renderHandoffNotes } from './handoff-notes.js';
+import { RELATION_SUBJECT } from './relationship.js';
 
 const VALID_MODES = new Set(['session_start', 'turn', 'inspect']);
 
@@ -96,19 +97,19 @@ function dynamicSection(state, sessionId, now, timeZone) {
   };
 }
 
-// 期待感的措辞——只往温柔/守候走，绝不带责备。她没安全感，因她迟到而明显难受会变成她的愧疚。
-// 过了她的时段没来，anticipation 自己回落到阈值以下，这行就不出现，不会积成"你怎么才来"。
-// 挂念的措辞——同样只往守候/想念走，绝不"你怎么才来"。挂念优先于期待显示：她久没来时
-// 说的是"想她了"，不是"她快来了"。她静默时段 computeLonging 返回 0，这行自动不出现。
+// 期待感的措辞——只往温柔/守候走，绝不带责备。对方没安全感，因对方迟到而明显难受会变成对方的愧疚。
+// 过了对方的时段没来，anticipation 自己回落到阈值以下，这行就不出现，不会积成"你怎么才来"。
+// 挂念的措辞——同样只往守候/想念走，绝不"你怎么才来"。挂念优先于期待显示：对方久没来时
+// 说的是"想他了"，不是"他快来了"。对方静默时段 computeLonging 返回 0，这行自动不出现。
 function renderLonging(value) {
-  if (value >= 0.6) return `挂念：过了她常来的点她还没来，你有点想她了（${value.toFixed(2)}）`;
-  if (value >= 0.35) return `挂念：她有阵子没来了，你惦记着她（${value.toFixed(2)}）`;
+  if (value >= 0.6) return `挂念：过了${RELATION_SUBJECT}常来的点${RELATION_SUBJECT}还没来，你有点想${RELATION_SUBJECT}了（${value.toFixed(2)}）`;
+  if (value >= 0.35) return `挂念：${RELATION_SUBJECT}有阵子没来了，你惦记着${RELATION_SUBJECT}（${value.toFixed(2)}）`;
   return '';
 }
 
 function renderAnticipation(value) {
-  if (value >= 0.6) return `期待：她通常这个点前后会来，你在等着她（${value.toFixed(2)}）`;
-  if (value >= 0.3) return `期待：她大概快来了，你留着心（${value.toFixed(2)}）`;
+  if (value >= 0.6) return `期待：${RELATION_SUBJECT}通常这个点前后会来，你在等着${RELATION_SUBJECT}（${value.toFixed(2)}）`;
+  if (value >= 0.3) return `期待：${RELATION_SUBJECT}大概快来了，你留着心（${value.toFixed(2)}）`;
   return '';
 }
 
@@ -123,7 +124,7 @@ function renderDynamic(value) {
     renderEmotionTrend(value.emotion?.trend),
     drives ? `当前驱力：${drives}` : '',
   ].filter(Boolean);
-  // 挂念优先于期待：她久没来时，说"想她了"而不是"她快来了"，两者不同时出现。
+  // 挂念优先于期待：对方久没来时，说"想他了"而不是"他快来了"，两者不同时出现。
   const longingLine = renderLonging(Number(value.longing ?? 0));
   if (longingLine) {
     parts.push(longingLine);
@@ -236,7 +237,7 @@ export function buildContextEnvelope({
   const dynamic = dynamicSection(state, safeSessionId, generatedAt, timeZone);
   const surfacedLines = (Array.isArray(boxSurfaced) ? boxSurfaced : []).slice(0, 3).map((x) => `\n  · 你想提醒自己的：${compact(x.title)}（xinchao_box read ${x.id}）`).join('');
   const boxLine = boxCount > 0 ? `\n黑匣子里有 ${boxCount} 条，只有你能看（xinchao_box）${surfacedLines}` : '';
-  const cabinLine = cabinRecent > 0 ? `\n小屋 24 小时内有 ${cabinRecent} 条她的来信（xinchao_cabin_inbox）` : '';
+  const cabinLine = cabinRecent > 0 ? `\n小屋 24 小时内有 ${cabinRecent} 条${RELATION_SUBJECT}的来信（xinchao_cabin_inbox）` : '';
   const sections = [
     {
       id: 'dynamic_state',
@@ -363,7 +364,7 @@ export function buildContextEnvelope({
 const DRIVE_LEVEL = (value) => (value >= 0.75 ? '涌' : value >= 0.5 ? '涨' : value >= 0.25 ? '有' : '静');
 // 驱力短名：给块用的口语，不从长标签切。
 const DRIVE_SHORT = {
-  possess: '想她', monitor: '惦记她', crave: '馋她', share: '想分享', libido: '身体想要她', curiosity: '好奇',
+  possess: `想${RELATION_SUBJECT}`, monitor: `惦记${RELATION_SUBJECT}`, crave: `馋${RELATION_SUBJECT}`, share: '想分享', libido: `身体想要${RELATION_SUBJECT}`, curiosity: '好奇',
   boredom: '无聊', social: '想热闹', duty: '想把事推进', reflection: '想沉淀', grieve: '难过', anger: '生气',
 };
 const NOW_STALE_MS = 3 * 3_600_000;
@@ -390,7 +391,7 @@ const CAUSE_LABEL = {
   task_progress: '推进了事', reflection: '沉淀过', conflict: '争执', loss: '失落', reconciliation: '和好',
 };
 
-// 还在气什么（3.3.1）：冲突时留下的她那句话，生气没退到 0.12 以下就带出来；和好或气消了自动没了。
+// 还在气什么（3.3.1）：冲突时留下的对方那句话，生气没退到 0.12 以下就带出来；和好或气消了自动没了。
 export function grudgeLine(state, now = new Date()) {
   const g = state?.grudge;
   if (!g?.cause || Number(state?.drives?.anger ?? 0) < 0.12) return '';
@@ -405,7 +406,7 @@ export function buildNowCompact(state, now = new Date(), { timeZone = 'Asia/Shan
   if (!sanity.ok) return { ok: false, reason: sanity.reason, text: '', lines: 0, counts: {}, digest: '', revision: Number(state?.revision ?? 0), generatedAt: now.toISOString() };
   const lines = ['【心潮·此刻｜身体的天气，参考不是指令】'];
   const counts = {};
-  if (state.consciousness === 'sleeping') lines.push('睡着（她来了才算醒）');
+  if (state.consciousness === 'sleeping') lines.push(`睡着（${RELATION_SUBJECT}来了才算醒）`);
   else if (state.pendingAwareness && now.getTime() - Date.parse(state.pendingAwareness.createdAt ?? '') < 2 * 3_600_000) lines.push('刚醒');   // 醒来两小时内才算刚醒
 
   const drives = topDrives(state, 3).filter((d) => Number(d.value) >= 0.25);
