@@ -3,3 +3,6 @@ buckets/
 xinchao/state/
 *.log
 .DS_Store
+node_modules/
+.pnpm-store/
+pnpm-lock.yaml
