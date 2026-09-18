@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { handleMcpMessage, OB_PROXY_TOOLS } from '../src/mcp-protocol.js';
+import { gateMcpSelfReport } from '../src/interaction-policy.js';
 import { SYSTEM_VERSION } from '../src/version.js';
 
 const request = (method, params = {}) => ({ jsonrpc: '2.0', id: 1, method, params });
@@ -11,6 +12,39 @@ test('MCP handshake reports the shared runtime version', async () => {
   }), {});
   assert.equal(result.status, 200);
   assert.equal(result.body.result.serverInfo.version, SYSTEM_VERSION);
+});
+
+test('MCP self-report gate requires exchange evidence for relationship types', () => {
+  const relational = { interactionType: 'affection' };
+  assert.equal(gateMcpSelfReport(relational), 'affection');
+  assert.equal(relational.interactionType, '');
+
+  const selfAction = { interactionType: 'reflection' };
+  assert.equal(gateMcpSelfReport(selfAction), null);
+  assert.equal(selfAction.interactionType, 'reflection');
+
+  const evidenced = { interactionType: 'affection', exchange: '对方：我抱了你。' };
+  assert.equal(gateMcpSelfReport(evidenced), null);
+  assert.equal(evidenced.interactionType, 'affection');
+
+  const disabled = { interactionType: 'affection' };
+  assert.equal(gateMcpSelfReport(disabled, false), null);
+  assert.equal(disabled.interactionType, 'affection');
+});
+
+test('gated MCP event response explains the missing exchange evidence', async () => {
+  const result = await handleMcpMessage(request('tools/call', {
+    name: 'xinchao_event',
+    arguments: { event_id: 'event-gate-0001', interaction_type: 'affection', session_id: 's1' },
+  }), {
+    event: async () => ({
+      sessionId: 's1', revision: 2,
+      interaction: { type: 'affection', applied: false, reasonCode: 'needs_her' },
+    }),
+    nowLine: async () => '',
+  });
+  assert.match(result.body.result.content[0].text, /exchange/);
+  assert.equal(result.body.result.structuredContent.interaction.reasonCode, 'needs_her');
 });
 
 test('tools/list keeps Xinchao, board and curated OB tools together', async () => {

@@ -76,7 +76,7 @@ test('quiet hours and the daily cap block signals; wake residue fires once per d
   assert.equal(detectSelfSignals(r.state, at(0.5)).signals.length, 0);
 });
 
-test('awareness candidates created today are announced once; templates rotate', () => {
+test('awareness digest goes out once on the review day only', () => {
   let state = baseState();
   for (let d = 0; d < 5; d += 1) {
     state = applyConversationEvent(state, ev('conflict', `k${d}`), at(-24 * (5 - d))).state;
@@ -85,11 +85,14 @@ test('awareness candidates created today are announced once; templates rotate', 
   state = applyConversationEvent(state, { eventId: 'wake', sessionId: 's' }, at(-0.1)).state;   // 醒着才递
   state = scanAwareness(state, at(0), { force: true }).state;
   assert.ok(state.awareness.candidates.length >= 1);
-  let r = detectSelfSignals(state, at(0));
+  // T0 = 2026-09-05 周六：默认复盘日是周日，不提
+  assert.equal(detectSelfSignals(state, at(0)).signals.filter((s) => s.kind === 'awareness').length, 0);
+  let r = detectSelfSignals(state, at(0), { awarenessReviewWeekday: 6 });
   const aw = r.signals.find((s) => s.kind === 'awareness');
   assert.ok(aw);
   assert.match(aw.text, /觉察/);
-  assert.equal(detectSelfSignals(r.state, at(1)).signals.filter((s) => s.kind === 'awareness').length, 0);
+  assert.doesNotMatch(aw.text, /均值|次/);                    // 只说有几条，不念候选原文
+  assert.equal(detectSelfSignals(r.state, at(1), { awarenessReviewWeekday: 6 }).signals.filter((s) => s.kind === 'awareness').length, 0);
   assert.match(renderNowLine(state, at(0)), /^此刻：/);
 });
 
@@ -110,4 +113,20 @@ test('a promoted obsession is announced once', () => {
   assert.ok(ob);
   assert.match(ob.text, /门是可以拉开的/);
   assert.equal(detectSelfSignals(r.state, at(1)).signals.filter((s) => s.kind === 'obsession').length, 0);
+});
+
+test('drive peak signals carry a response hint: self-serve drives say how to report, relational ones wait for a partner response', async () => {
+  const { responseHint, SELF_SERVE_DRIVES } = await import('../src/self-signals.js');
+  assert.ok(SELF_SERVE_DRIVES.has('reflection'));
+  assert.match(responseHint('reflection'), /xinchao_event/);
+  // 3.3.5：一维一句，类型和引擎映射一致
+  assert.match(responseHint('reflection'), /interaction_type 填 reflection/);
+  assert.match(responseHint('reflection'), /不算沉淀/);
+  assert.match(responseHint('share'), /填 sharing/);
+  assert.match(responseHint('duty'), /填 task_progress/);
+  assert.match(responseHint('curiosity'), /填 discovery/);
+  assert.match(responseHint('boredom'), /填 discovery/);
+  for (const k of SELF_SERVE_DRIVES) assert.match(responseHint(k), /xinchao_event/);
+  assert.doesNotMatch(responseHint('possess'), /xinchao_event/);
+  assert.match(responseHint('possess'), /等对方回应/);
 });

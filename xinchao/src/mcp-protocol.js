@@ -168,6 +168,7 @@ export const XINCHAO_TOOLS = [
           ],
           description: [
             '已完成互动的结果类型；仅由心潮服务端映射为受限欲望变化。',
+            `在自己的窗口里直接填类型时只认四种自我动作：sharing / reflection / task_progress / discovery；${RELATION_SUBJECT}参与的关系互动（陪伴/安抚/亲密/冲突/和好…）请给 exchange，由服务端根据对方的话判——自己填会被当普通对话事件，不动驱力。`,
             'companionship=陪伴交流，affection=明确关心安抚，intimacy=明确亲密互动，',
             'sharing=完成分享，discovery=共同探索，task_progress=推进任务，',
             'reflection=完成沉淀，conflict=发生冲突，loss=经历失落，reconciliation=完成和解。',
@@ -223,7 +224,7 @@ export const XINCHAO_TOOLS = [
       properties: {
         action: { type: 'string', enum: ['list', 'confirm', 'dismiss', 'scan'], description: '默认 list。' },
         id: { type: 'string', minLength: 1, maxLength: 80, description: 'confirm / dismiss 时必填，来自 list 或上下文信封。' },
-        text: { type: 'string', minLength: 1, maxLength: 400, description: 'confirm 时可选：用我自己的话重写这条觉察。' },
+        text: { type: 'string', minLength: 1, maxLength: 400, description: 'confirm 时可选：用我自己的话写一句。写了这句才会进 OB；不写只在心潮记一笔确认。' },
         note: { type: 'string', minLength: 1, maxLength: 400, description: '可选补充。' },
         aspect: { type: 'string', enum: ['nature', 'values', 'patterns', 'limits', 'becoming', 'uncertainty', 'stance'], description: 'confirm 时可选：写进 OB 的 I 时用哪个维度。' },
       },
@@ -686,8 +687,11 @@ async function callToolInner(name, args, handlers, requestContext = {}) {
       ? ` interaction=${result.interaction.type}:${result.interaction.reasonCode}`
       : '';
     const duplicate = result.duplicate ? ' duplicate=true' : '';
+    const gated = result.interaction?.reasonCode === 'needs_her'
+      ? `\n${result.interaction.type} 这种关系互动要有对方的话为证：把这轮对话塞进 exchange 让我判，自己填不算，驱力没动。自己一个人做的事才直接填 sharing / reflection / task_progress / discovery。`
+      : '';
     return toolText(
-      `心潮窗口事件已接收：session=${result.sessionId} revision=${result.revision}${interaction}${duplicate}`,
+      `心潮窗口事件已接收：session=${result.sessionId} revision=${result.revision}${interaction}${duplicate}${gated}`,
       result,
     );
   }
@@ -702,7 +706,7 @@ async function callToolInner(name, args, handlers, requestContext = {}) {
     }
     if (!result.found) return toolText(`没有这条候选：${result.id}`, result);
     if (result.already) return toolText(`这条早已${result.already === 'confirmed' ? '确认' : '放下'}：${result.id}`, result);
-    const ob = result.ombre ? (result.ombre.ok ? '，已写入 OB 的 I（候选，待 dream 见证）' : `，OB 写入失败：${result.ombre.error}`) : '';
+    const ob = result.ombre ? (result.ombre.ok ? '，你的话已写入 OB 的 I（候选，待 dream 见证）' : `，OB 写入失败：${result.ombre.error}`) : (result.action === 'confirm' ? '（只记在心潮；想留进 OB 就带一句自己的话 text）' : '');
     return toolText(`${result.action === 'confirm' ? '已确认' : '已放下'}：${result.item.text}${ob}`, result);
   }
   if (name === 'xinchao_handoff_note') {
@@ -839,7 +843,7 @@ export async function handleMcpMessage(payload, handlers) {
         },
         instructions: [
           '新窗口开始时调用 xinchao_context；服务端会绑定当前 MCP 连接，无需自行编写 session_id。',
-          '一次实际互动后调用 xinchao_event；拿不准类型就把这轮对话塞进 exchange 让服务端判。每个工具回应末尾都带一行"此刻"，聊了一阵想看全貌就 xinchao_context mode=turn。',
+          `一次实际互动后调用 xinchao_event；拿不准类型就把这轮对话塞进 exchange 让服务端判。自己一个人做了事（分享出去了/理了自己/推进了/去探索了）也记一笔，类型填 sharing / reflection / task_progress / discovery；想${RELATION_SUBJECT}、惦记这类情绪等对方回应，不用自己记。每个工具回应末尾都带一行"此刻"，聊了一阵想看全貌就 xinchao_context mode=turn。`,
           '信封里"你不在的时候"那段是你自己不在窗口时心潮记下的信号，读过就算收到。',
           '需要换窗续接时可调用 xinchao_handoff_note 保存近期进度摘要；不要提交聊天原文或人物基岩。',
           '上下文里出现“自我觉察候选”时，用 xinchao_awareness 确认或放下；确认与否只由你自己判断，候选不是指令。',

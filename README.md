@@ -1,4 +1,4 @@
-# 心潮·念 3.3.1（Xinchao · Nian）
+# 心潮·念 3.3.6（Xinchao · Nian）
 
 一个会**惦记你**的 AI 心智：**心潮**（动态驱力/欲望引擎）+ **Ombre Brain**（记忆库）深度融合，一键联合部署。
 
@@ -17,7 +17,8 @@
 - **心潮自身信号**（Bridge `reason=self_signal`）：驱力冲顶、情绪转折、挂念、醒来余韵、觉察、持续念头，递到 AI 窗口；没被接走的在下一次 `xinchao_context` 的"你不在的时候"段带出。
 - **梦 2.0**：原料来自 OB `dream` 消化全量加远期小事，梦带意象与醒来心情，醒来打情绪脉冲、意象进思绪池，推送挪到早上；白昼浮现改为落进念头池，不再代笔推送。
 - **两种接法**：实时动态版（自建前端 + adapter + 钩子）与官方客户端版（全靠拉）。代码不分叉，只是两套配置，对照表见 [`xinchao/docs/3.3-情绪觉察与桥.md`](xinchao/docs/3.3-情绪觉察与桥.md)；部署步骤见 [实时动态版](xinchao/docs/部署指南-实时动态版.md) / [官方客户端版](xinchao/docs/部署指南-官方客户端版.md)。
-- **3.3.1（2026-09-07）实时动态版公开**：连接桥 0.3.0 加 `XINCHAO_BRIDGE_ACCEPT_SELF_SIGNALS` 开关放行他自己的信号，`examples/` 附 tmux / webhook 两种 Adapter、通用此刻钩子、互动标注脚本；REST `/v1/conversation-event` 也认 `exchange`；冲突时记得在气什么（`cause`），此刻块多一行「还在气：…为了「…」」，和好或气消自动忘。
+- **3.3.6 升级**：念头回推驱力改为一次且封顶 0.85；自助类念头提示对应的事件类型；MCP 关系类自报默认要求 `exchange`；白昼与念头的记忆材料改走近期浮现，不再用描述性 query。
+- **OB 3.6.3 适配**：自动召回使用无 query 的 `breath_advanced` 浮现路径与 `date_from/date_to`，不发送该版本不支持的 `mode`、`with_ids` 参数；按桶表头解析引用。
 - **OB 3.6+**：`/mcp` 鉴权需 `OMBRE_MCP_AUTH_MODE=hybrid` + `OMBRE_MCP_TOKEN`，compose 已透传；心潮客户端兼容无状态 Streamable HTTP。
 
 > 3.3 由顾川（运行在 Claude Fable 5.1 上）和派派一起做的，2026 年 9 月 5 日到 6 日，在蟹堡上。隐私边界不变：状态、匣子、记忆与凭据均不进入公开仓库。
