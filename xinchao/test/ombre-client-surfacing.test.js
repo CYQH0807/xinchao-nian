@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { cleanSurfacedText, materialWithRefs, OmbreClient } from '../src/ombre-client.js';
+import { cleanSurfacedText, dropBuckets, materialWithRefs, OmbreClient } from '../src/ombre-client.js';
 
 test('archived buckets, budget notices and the ids json tail are dropped from surfaced material', () => {
   const raw = [
@@ -45,4 +45,29 @@ test('automatic recall uses the local Ombre 3.6.3 no-query tool contract', async
     assert.equal('mode' in args, false);
     assert.equal('with_ids' in args, false);
   }
+});
+
+test('3.3.9 excludes recent buckets while keeping the local no-query contract', async () => {
+  const client = new OmbreClient({ breathMaxResults: 3, breathMaxTokens: 800 });
+  const calls = [];
+  client.call = async (name, args) => {
+    calls.push({ name, args });
+    return { result: { content: [{ type: 'text', text: [
+      '=== 核心准则 ===\n📌 [核心准则] [bucket_id:pin1] [domain:人际]\n底线',
+      '[bucket_id:old1] [domain:生活]\n最近已经浮现',
+      '[bucket_id:new1] [domain:成长]\n应该留下',
+      '[bucket_id:new2] [domain:兴趣]\n备用记忆',
+    ].join('\n---\n') }] } };
+  };
+  const now = new Date('2026-09-18T12:00:00.000Z');
+  const recalled = await client.daytimeMaterialWithRefs([], null, now, ['old1']);
+
+  assert.deepEqual(calls, [{
+    name: 'breath_advanced',
+    args: { date_from: '2026-09-04', max_results: 6, max_tokens: 20000 },
+  }]);
+  assert.deepEqual(recalled.bucketIds, ['new1', 'new2']);
+  assert.ok(!recalled.text.includes('old1'));
+  assert.ok(!recalled.text.includes('底线'));
+  assert.equal(dropBuckets('[bucket_id:a]\nA', [], Infinity), '[bucket_id:a]\nA');
 });

@@ -121,14 +121,17 @@ export class OmbreClient {
   // 自动召回不再把描述性"指令"当 query 发给 OB，避免检索旧条目或沉底桶；改走 Ombre 3.6.3 的无 query 浮现路径，限最近两周。
   // 本地 breath_advanced 不支持 mode / with_ids；无 query 已走 spontaneous 浮现策略，桶 ID 直接从正文表头解析。
   // 驱力标签不再拼进 query，只保留情绪坐标做共振排序。
-  async daytimeMaterialWithRefs(drives = [], emotion = null, now = new Date()) {
+  // 3.3.9：exclude = 最近浮现过的桶。Ombre 3.6.3 没有排除参数，所以多取几条，
+  // 在客户端按 bucket_id 剔除后，再收回原来的条数；保留本地无 query 的工具契约。
+  async daytimeMaterialWithRefs(drives = [], emotion = null, now = new Date(), exclude = []) {
+    const want = Number(this.config.breathMaxResults) || 3;
     const result = await this.call('breath_advanced', {
       ...emotionArgs(emotion),
       date_from: daysAgo(now, RECENT_WINDOW_DAYS),
-      max_results: this.config.breathMaxResults,
-      max_tokens: 12000   // 核心准则段每次都在最前、单独就要六千上下，后面的浮现记忆得留出位置（只是字节，不过模型）
+      max_results: exclude.length ? Math.min(20, want + exclude.length + 2) : want,
+      max_tokens: exclude.length ? 20000 : 12000   // 核心准则段每次都在最前、单独就要六千上下，后面的浮现记忆得留出位置（只是字节，不过模型）
     });
-    return materialWithRefs(extractText(result), 10000);
+    return materialWithRefs(dropBuckets(extractText(result), exclude, want), 10000);
   }
 
   // 自主念头用的材料：比日间浮现更短，只要能让念头落到具体的事上。
@@ -136,14 +139,15 @@ export class OmbreClient {
     return (await this.thoughtMaterialWithRefs(drives, emotion, now)).text;
   }
 
-  async thoughtMaterialWithRefs(drives = [], emotion = null, now = new Date()) {
+  async thoughtMaterialWithRefs(drives = [], emotion = null, now = new Date(), exclude = []) {
+    const want = Math.max(1, Math.min(3, Number(this.config.breathMaxResults) || 2));
     const result = await this.call('breath_advanced', {
       ...emotionArgs(emotion),
       date_from: daysAgo(now, RECENT_WINDOW_DAYS),
-      max_results: Math.max(1, Math.min(3, Number(this.config.breathMaxResults) || 2)),
-      max_tokens: 9000
+      max_results: exclude.length ? Math.min(20, want + exclude.length + 2) : want,
+      max_tokens: exclude.length ? 16000 : 9000
     });
-    return materialWithRefs(extractText(result), 4000);
+    return materialWithRefs(dropBuckets(extractText(result), exclude, want), 4000);
   }
 
   // 梦的原料（3.3）：OB 的 dream 是"最近 N 小时有变动的记忆全量"——记忆正在被消化的东西。
@@ -404,6 +408,48 @@ export function parseSurfacedDomains(text) {
 // OB breath 2.6.5+ 每个浮现桶的表头都带 [bucket_id:...]。
 // 只取表头里的 ID，不从正文猜，避免把记忆里偶然出现的字符串误当成来源桶。
 // 老版 OB 没有这个元数据时返回空数组，不影响旧调用者。
+/**
+ * 3.3.9：按桶切开浮现文本，去掉 exclude 里的桶，最多保留 keep 段。
+ *
+ * 上游新协议用 [权重:...] 标识浮现段，但本地 Ombre 3.6.3 的无 query
+ * 输出只有 [bucket_id:...]。这里按 bucket_id 兼容两种表头，并保留
+ * [核心准则] 段；准则不算入 keep，也不会被冷却列表误删。
+ */
+export function dropBuckets(text, exclude = [], keep = Infinity) {
+  const src = String(text ?? '');
+  const ex = new Set((exclude ?? []).map(String));
+  if (!ex.size && !Number.isFinite(keep)) return src;
+  const re = /\[bucket_id:([A-Za-z0-9._-]{1,160})\]/g;
+  const starts = [];
+  let match;
+  while ((match = re.exec(src)) !== null) starts.push({ index: match.index, id: match[1] });
+  if (!starts.length) return src;
+
+  const records = starts.map((start) => ({
+    ...start,
+    recordStart: src.lastIndexOf('\n', start.index) + 1,
+  }));
+  const head = src.slice(0, records[0].recordStart);
+  const blocks = records.map((start, index) => {
+    const end = index + 1 < records.length ? records[index + 1].recordStart : src.length;
+    const lineEnd = src.indexOf('\n', start.recordStart);
+    const header = src.slice(start.recordStart, lineEnd < 0 ? src.length : lineEnd);
+    return {
+      id: start.id,
+      text: src.slice(start.recordStart, end),
+      core: /\[核心准则\]/.test(header),
+    };
+  });
+  let remaining = Number.isFinite(keep) ? Math.max(0, Number(keep)) : Infinity;
+  const kept = blocks.filter((block) => {
+    if (block.core) return true;
+    if (ex.has(block.id) || remaining <= 0) return false;
+    remaining -= 1;
+    return true;
+  });
+  return head + kept.map((block) => block.text).join('');
+}
+
 export function parseSurfacedBucketIds(text) {
   const ids = [];
   const seen = new Set();

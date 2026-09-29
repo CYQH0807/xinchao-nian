@@ -10,6 +10,14 @@ const clamp = (value, min = 0, max = 1) => Math.max(min, Math.min(max, value));
 // 驱力被顶到自己的静息天花板之上后，每小时松弛回来的比例（越大回落越快）。
 const CEIL_RELAX_PER_HOUR = 0.10;
 const THOUGHT_FEEDBACK_CAP = 0.85;   // 3.3.6：念头回推的驱力上限
+const RELIEF_MAX = 0.60;             // 3.3.7：一次互动最多松掉六成
+const RELIEF_PLATEAU_FROM = 0.15;
+const RELIEF_PLATEAU_MAX_HOURS = 2.5;
+const RELIEF_FLOOR_RATIO = 0.35;     // 3.3.8：松弛不低于静息线的 35%
+const RELIEF_REPEAT_WINDOW_MS = 60 * 60_000;
+const TRAIL_SAMPLE_MS = 30 * 60_000;
+const TRAIL_KEEP = 48;
+const TREND_LOOKBACK_MS = 2 * 3_600_000;
 // 记忆共振只回推亲和度够强的维度，弱关联不动（沿用规格 onRecall 的 >0.5 门槛）。
 const RESONANCE_MIN_AFFINITY = 0.5;
 // 作息预期：对方隔了一段时间后再出现才算"一次到来"计入节律；心跳不算。旧节律每次到来轻微衰减，自适应。
@@ -43,9 +51,9 @@ export const INTERACTION_TYPES = Object.freeze([
 ]);
 
 const INTERACTION_EFFECTS = Object.freeze({
-  companionship: { relief: { monitor: 0.06, social: 0.05 } },
-  affection: { relief: { possess: 0.08, crave: 0.08, monitor: 0.05 } },
-  intimacy: { relief: { possess: 0.12, crave: 0.15, libido: 0.18 } },
+  companionship: { relief: { monitor: 0.18, possess: 0.06, social: 0.08 } },
+  affection: { relief: { possess: 0.22, crave: 0.18, monitor: 0.15 } },
+  intimacy: { relief: { possess: 0.40, crave: 0.45, libido: 0.55, monitor: 0.15 } },
   sharing: { relief: { share: 0.14, social: 0.04 } },
   discovery: { relief: { curiosity: 0.15, boredom: 0.12 } },
   task_progress: { relief: { duty: 0.15 } },
@@ -70,6 +78,9 @@ function ensureStateShape(state) {
   state.arrivalHistogram = Array.isArray(state.arrivalHistogram) && state.arrivalHistogram.length === 24
     ? state.arrivalHistogram.map((n) => Number(n) || 0)
     : Array.from({ length: 24 }, () => 0);
+  state.driveTrail = Array.isArray(state.driveTrail) ? state.driveTrail.slice(-TRAIL_KEEP) : [];
+  state.surfacedBuckets = state.surfacedBuckets && typeof state.surfacedBuckets === 'object' && !Array.isArray(state.surfacedBuckets) ? state.surfacedBuckets : {};   // 3.3.9：桶 → 上次浮现时间
+  state.interactionLastAt = state.interactionLastAt && typeof state.interactionLastAt === 'object' ? state.interactionLastAt : {};
   ensureEmotion(state);
   ensureAwareness(state);
   ensureSelfSignals(state);
@@ -154,12 +165,24 @@ function applyInteractionOutcome(state, type, now, options = {}) {
 
   const effect = INTERACTION_EFFECTS[type];
   const affected = new Set();
+  const lastSame = Date.parse(state.interactionLastAt?.[type] ?? '');
+  const repeatMul = Number.isFinite(lastSame) && now.getTime() - lastSame < RELIEF_REPEAT_WINDOW_MS ? 0.5 : 1;
   for (const [key, relief] of Object.entries(effect.relief ?? {})) {
     if (!DRIVE_KEYS.includes(key)) continue;
     const current = Number(state.drives[key] ?? 0);
-    state.drives[key] = Number(clamp(current * (1 - clamp(Number(relief), 0, 0.35))).toFixed(4));
+    const r = clamp(Number(relief) * repeatMul, 0, RELIEF_MAX);
+    const dim = DIMENSIONS[key];
+    const floor = Number.isFinite(dim?.decayHalfLifeHours) ? 0 : RELIEF_FLOOR_RATIO * Number(dim?.ceil ?? SATURATE_CEIL);
+    const next = current > floor ? floor + (current - floor) * (1 - r) : current;
+    state.drives[key] = Number(clamp(next).toFixed(4));
     affected.add(key);
+    const activeUntil = Date.parse(state.satisfactionPlateaus[key]?.until ?? '');
+    if (r >= RELIEF_PLATEAU_FROM && !(Number.isFinite(activeUntil) && activeUntil > now.getTime())) {
+      const hours = clamp(r * 6, 0, RELIEF_PLATEAU_MAX_HOURS);
+      state.satisfactionPlateaus[key] = { startedAt: iso(now), until: iso(new Date(now.getTime() + hours * 3_600_000)), reason: `relief:${type}` };
+    }
   }
+  state.interactionLastAt = { ...(state.interactionLastAt ?? {}), [type]: iso(now) };
   for (const [key, increase] of Object.entries(effect.increase ?? {})) {
     if (!DRIVE_KEYS.includes(key)) continue;
     const current = Number(state.drives[key] ?? 0);
@@ -253,17 +276,47 @@ export function applySurfacedThought(input, driveKey, text, now = new Date(), am
 }
 
 // 浮现的记忆落到哪一维：按 domain 亲和度取最强的一维；没有就用当前最强驱力。
+// 3.3.9：浮现念头挂在哪一维——按亲和度从高到低，跳过已经「涌」的维（高出自己静息线 0.05 或 ≥0.90）。
+// 原来永远挂亲和度最高的那维：「内心」→沉淀 0.8 几乎每段记忆都带，沉淀维静息线最低、回落又慢，
+// 于是一直被念头往上堆、一直是「涌」，驱力提示也一直挑它。都在涌就还挂最高的那维。
 export function surfacedDriveKey(domains = [], state = null) {
-  let best = null;
+  const merged = {};
   for (const raw of domains) {
     const map = DOMAIN_AFFINITY[String(raw ?? '').trim()];
     if (!map) continue;
     for (const [key, value] of Object.entries(map)) {
       if (!DRIVE_KEYS.includes(key)) continue;
-      if (!best || value > best.value) best = { key, value };
+      merged[key] = Math.max(merged[key] ?? 0, Number(value) || 0);
     }
   }
-  return best?.key ?? (state ? (topDrives(state, 1)[0]?.key ?? null) : null);
+  const ranked = Object.entries(merged).sort((a, b) => b[1] - a[1]).map(([key]) => key);
+  if (!ranked.length) return state ? (topDrives(state, 1)[0]?.key ?? null) : null;
+  if (!state) return ranked[0];
+  const surging = (key) => {
+    const v = Number(state.drives?.[key] ?? 0);
+    const ceil = Number(DIMENSIONS[key]?.ceil ?? SATURATE_CEIL);
+    return v >= 0.90 || v >= ceil + 0.05;
+  };
+  return ranked.find((key) => !surging(key)) ?? ranked[0];
+}
+
+// 3.3.9：同一段记忆 72 小时内不再浮现。OB 不带关键词时按权重返回，同样的情绪坐标每次都捞到同一段，
+// 同一个闪念连着几天冒出来、还被升成「持续念头」——那是检索单调，不是真的放不下。
+export const SURFACE_COOLDOWN_HOURS = 72;
+export function recentSurfacedBucketIds(state, now = new Date(), hours = SURFACE_COOLDOWN_HOURS) {
+  const since = new Date(now).getTime() - hours * 3_600_000;
+  return Object.entries(state?.surfacedBuckets ?? {})
+    .filter(([, at]) => Date.parse(at) >= since)
+    .map(([id]) => id);
+}
+export function recordSurfacedBuckets(input, ids = [], now = new Date(), hours = SURFACE_COOLDOWN_HOURS) {
+  const state = structuredClone(input);
+  const since = new Date(now).getTime() - hours * 3_600_000;
+  const kept = Object.entries(state.surfacedBuckets ?? {}).filter(([, at]) => Date.parse(at) >= since);
+  state.surfacedBuckets = Object.fromEntries(kept);
+  for (const id of ids) if (id) state.surfacedBuckets[String(id)] = iso(now);
+  state.revision = (state.revision ?? 0) + 1;
+  return state;
 }
 
 export function newState(now = new Date()) {
@@ -497,9 +550,33 @@ export function settleState(input, now = new Date(), sleepAfterMinutes = 90, opt
     changed = true;
   }
 
+  const lastSample = Date.parse(state.driveTrail[state.driveTrail.length - 1]?.at ?? '');
+  if (!Number.isFinite(lastSample) || nowMs - lastSample >= TRAIL_SAMPLE_MS) {
+    state.driveTrail = [...state.driveTrail, { at: iso(now), drives: Object.fromEntries(DRIVE_KEYS.map((key) => [key, Number(state.drives[key] ?? 0)])) }].slice(-TRAIL_KEEP);
+    changed = true;
+  }
+
   state.lastSettledAt = iso(now);
   if (changed) state.revision += 1;
   return { state, changed, elapsedHours, idleMinutes };
+}
+
+export function driveTrend(state, key, now = new Date()) {
+  const trail = Array.isArray(state?.driveTrail) ? state.driveTrail : [];
+  if (!trail.length) return null;
+  const cutoff = now.getTime() - TREND_LOOKBACK_MS;
+  let ref = null;
+  for (const sample of trail) {
+    const time = Date.parse(sample?.at ?? '');
+    if (!Number.isFinite(time)) continue;
+    if (time <= cutoff) ref = sample;
+    else break;
+  }
+  ref ??= trail[0];
+  const before = Number(ref?.drives?.[key]);
+  const current = Number(state?.drives?.[key]);
+  if (!Number.isFinite(before) || !Number.isFinite(current)) return null;
+  return Number((current - before).toFixed(4));
 }
 
 // ── Conversation event (wake up / interact) ───────────────────────

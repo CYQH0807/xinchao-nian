@@ -5,7 +5,7 @@ import { emotionCoords, emotionSummary, stampEmotionArgs } from './emotion.js';
 import { recordSurfacing, resolveAwareness, scanAwareness, awarenessSummary } from './awareness.js';
 import { detectSelfSignals, renderNowLine } from './self-signals.js';
 import { BlackBox, renderBoxList } from './black-box.js';
-import { INTERACTION_TYPES, applyDriveFeedback, applyMemoryResonance, applyOmbreHeartbeat, applyOutputReflux, applyLongingNudge, barkAllowed, breathDreamContext, contactIdleAllowed, computeLonging, daytimeEmergenceAllowed, dreamAllowed, newState, pickIntent, proactiveBarkAllowed, recordBark, recordDaytimeEmergence, recordDream, scheduleDaytimeEmergence, settleAndApplyConversationEvent, settleState, topDrives, computeAnticipation, localDayAndHour, applySurfacedThought, surfacedDriveKey } from './engine.js';
+import { INTERACTION_TYPES, applyDriveFeedback, applyMemoryResonance, applyOmbreHeartbeat, applyOutputReflux, applyLongingNudge, barkAllowed, breathDreamContext, contactIdleAllowed, computeLonging, daytimeEmergenceAllowed, dreamAllowed, newState, pickIntent, proactiveBarkAllowed, recordBark, recordDaytimeEmergence, recordDream, scheduleDaytimeEmergence, settleAndApplyConversationEvent, settleState, topDrives, computeAnticipation, localDayAndHour, applySurfacedThought, surfacedDriveKey, recentSurfacedBucketIds, recordSurfacedBuckets } from './engine.js';
 import { buildInteractionBridgeMessage } from './interaction-messages.js';
 import { selectUniqueBark } from './bark-dedupe.js';
 import { StateStore } from './state-store.js';
@@ -459,8 +459,12 @@ async function runCycle() {
       let thoughtSourceBucketIds = [];
       if (config.ombre.readEnabled) {
         try {
-          const recalled = await ombre.thoughtMaterialWithRefs(topDrives(state), emotionForOmbre(state), now);
+          const recalled = await ombre.thoughtMaterialWithRefs(topDrives(state), emotionForOmbre(state), now, recentSurfacedBucketIds(state, now));
           thoughtSourceBucketIds = recalled.bucketIds;
+          if (recalled.bucketIds.length) {
+            state = await updateState({ type: 'surfaced_buckets', source: 'autonomous', details: { count: recalled.bucketIds.length }, at: now },
+              (latest) => recordSurfacedBuckets(latest, recalled.bucketIds, now));
+          }
           thoughtMaterial = await materialFromReferencedBuckets(recalled, 5);
         }
         catch (error) { log('ombre_read_failed', { message: error.message }); }
@@ -548,7 +552,11 @@ async function runCycle() {
     } else if (!config.shadowMode && config.daytime.enabled && config.ombre.readEnabled && (!config.daytime.bark || config.bark.enabled) && daytimeEmergenceAllowed(state, now, config.daytime)) {
       let selected = { message: '', candidate: { source: 'none' }, reason: 'empty', attempts: 1 };
       try {
-        const recalled = await ombre.daytimeMaterialWithRefs(topDrives(state), emotionForOmbre(state), now);
+        const recalled = await ombre.daytimeMaterialWithRefs(topDrives(state), emotionForOmbre(state), now, recentSurfacedBucketIds(state, now));
+        if (recalled.bucketIds.length) {
+          state = await updateState({ type: 'surfaced_buckets', source: 'daytime', details: { count: recalled.bucketIds.length }, at: now },
+            (latest) => recordSurfacedBuckets(latest, recalled.bucketIds, now));
+        }
         const material = await materialFromReferencedBuckets(recalled, 5);
         if (config.resonance.enabled && material) {
           const domains = parseSurfacedDomains(material);
@@ -971,7 +979,7 @@ async function createContextEnvelope({
 }
 
 // 没填类型但给了 exchange（他说的一句 + 他回的一段）→ 服务端替接收端判互动类型和氛围。
-// MCP（官方客户端版）和 REST /v1/conversation-event（自建运行时）共用；8 分钟内不重复判，和 PaiHome 钩子的节流一致。
+// MCP（官方客户端版）和 REST /v1/conversation-event（自建运行时）共用；节流间隔由 INTERACTION_CLASSIFY_MIN_MINUTES 控制（默认 8 分钟）。
 // exchange 正文只走这一跳：判完即删，不进状态、不进审计。
 async function classifyExchange(event, source = 'api') {
   if (event.interactionType === undefined && event.interaction_type !== undefined) event.interactionType = event.interaction_type;
@@ -982,7 +990,7 @@ async function classifyExchange(event, source = 'api') {
   if (event.interactionType || !exchange || !config.model.enabled) return null;
   const snapshot = await store.read();
   const lastAt = Date.parse(snapshot.interactionClassifyAt ?? '');
-  if (Number.isFinite(lastAt) && Date.now() - lastAt < 8 * 60_000) return { skipped: 'throttled' };
+  if (Number.isFinite(lastAt) && Date.now() - lastAt < (config.interaction?.classifyMinMinutes ?? 8) * 60_000) return { skipped: 'throttled' };
   try {
     const tag = await model.classifyInteraction(exchange);
     if (!tag) return null;

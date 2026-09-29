@@ -112,6 +112,19 @@ export const DIMENSIONS = Object.freeze({
 
 export const DRIVE_KEYS = Object.freeze(Object.keys(DIMENSIONS));
 
+export const LEVEL_TREND_DELTA = 0.08;
+export function driveLevel(key, value, delta = null) {
+  const v = Number(value);
+  if (!Number.isFinite(v) || v < 0.25) return '静';
+  const ceil = Number(DIMENSIONS[key]?.ceil ?? SATURATE_CEIL);
+  if (v >= 0.90 || v >= ceil + 0.05) return '涌';
+  if (Number.isFinite(delta)) {
+    if (delta <= -LEVEL_TREND_DELTA) return '落';
+    if (delta >= LEVEL_TREND_DELTA) return '涨';
+  }
+  return '平';
+}
+
 // 记忆共振：一条记忆浮现时，按它的 domain 把"想起什么"回推到"想要什么"。
 // 键用我们真实的 12 维；多个 domain 命中时每维取最大值，不累加（沿用规格 v1 规则表）。
 // 只用 domain 不用 tags——domain 干净可靠，tags 一条桶动辄二十个、太糊，

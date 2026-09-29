@@ -97,6 +97,7 @@ export function loadConfig() {
     },
     interaction: {
       maxEffectsPerDay: number('INTERACTION_MAX_EFFECTS_PER_DAY', 24, 1, 96),
+      classifyMinMinutes: number('INTERACTION_CLASSIFY_MIN_MINUTES', 8, 1, 240),
       // 3.3.4：MCP 客户端直接填的 interaction_type 只认四种自我动作；关系类需提供对方参与的 exchange 内容供服务端判断。
       mcpSelfReportGate: bool('MCP_SELF_REPORT_GATE', true),
       timeZone: process.env.INTERACTION_TIME_ZONE ?? process.env.SETTLE_TIME_ZONE ?? 'Asia/Shanghai',

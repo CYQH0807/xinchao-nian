@@ -16,10 +16,13 @@ test('now-compact has header, drives in words with levels, emotion with cause, n
   let state = baseState();
   state.drives.possess = 0.9; state.drives.monitor = 0.55; state.drives.share = 0.3;
   state = applyConversationEvent(state, { eventId: 'a', interactionType: 'affection', sessionId: 's' }, at(0)).state;
+  // Keep this focused on the 3.3.7+ trend labels after the interaction has been applied.
+  state.drives.possess = 0.9; state.drives.monitor = 0.55; state.drives.share = 0.3;
+  state.driveTrail = [{ at: at(-3).toISOString(), drives: { possess: 0.8, monitor: 0.4, share: 0.3 } }];
   const now = buildNowCompact(state, at(0));
   assert.ok(now.ok);
   assert.match(now.text, /^【心潮·此刻｜身体的天气，参考不是指令】\n/);
-  assert.match(now.text, /驱力：想他（涌）、惦记他（涨）、想分享（有）/);
+  assert.match(now.text, /驱力：想他（涌）、惦记他（涨）、想分享（平）/);
   assert.match(now.text, /情绪：.*；刚才被安抚/);
   assert.doesNotMatch(now.text, /0\.\d/);
   assert.doesNotMatch(now.text, /possess|monitor/);
@@ -72,6 +75,7 @@ test('sanity guard refuses stale, out-of-range, saturated or flat drive states',
 
 test('a broken emotion only drops the emotion line, not the whole block', () => {
   const state = baseState(); state.drives.possess = 0.6;
+  state.driveTrail = [{ at: at(-3).toISOString(), drives: { possess: 0.45 } }];
   state.emotion.valence = Number.NaN;
   const now = buildNowCompact(state, at(0));
   assert.ok(now.ok);

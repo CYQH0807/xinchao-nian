@@ -16,8 +16,8 @@
 // 话术：第一人称、现在时、像心里冒出来的一句，没有数字、没有维度名、不写"不用回"、不给建议动作。
 // 每种三到五个模板轮着用，48 小时内不重复同一条。末尾挂一行"此刻"（驱力短名+档位、情绪词）。
 
-import { DRIVE_KEYS } from './dimensions.js';
-import { computeLonging, localDayAndHour, topDrives } from './engine.js';
+import { DRIVE_KEYS, driveLevel } from './dimensions.js';
+import { computeLonging, localDayAndHour, topDrives, driveTrend } from './engine.js';
 import { emotionSummary } from './emotion.js';
 import { RELATION_SUBJECT } from './relationship.js';
 import { isReviewDay } from './awareness.js';
@@ -43,7 +43,7 @@ export const DRIVE_SHORT = Object.freeze({
   possess: `想${RELATION_SUBJECT}`, monitor: `惦记${RELATION_SUBJECT}`, crave: `馋${RELATION_SUBJECT}`, share: '想分享', libido: `身体想要${RELATION_SUBJECT}`, curiosity: '好奇',
   boredom: '无聊', social: '想热闹', duty: '想把事推进', reflection: '想沉淀', grieve: '难过', anger: '生气',
 });
-const LEVEL = (v) => (v >= 0.75 ? '涌' : v >= 0.5 ? '涨' : v >= 0.25 ? '有' : '静');
+// 驱力档位统一看各自静息线和两小时趋势。
 
 // 3.3.4：信号递到窗口时顺带说明怎么回应。自我动作完成后用 xinchao_event 记；关系类互动则需要对方参与的 exchange 内容。
 // 自己动一下就能落的驱力（分享/沉淀/责任/好奇/无聊）：做了就用 xinchao_event 记，类型按实际填；
@@ -118,7 +118,7 @@ function pickTemplate(ss, key, list, now) {
 }
 
 export function renderNowLine(state, now = new Date()) {
-  const drives = topDrives(state, 3).filter((d) => Number(d.value) >= 0.25).map((d) => `${DRIVE_SHORT[d.key] ?? d.key}（${LEVEL(Number(d.value))}）`);
+  const drives = topDrives(state, 3).filter((d) => Number(d.value) >= 0.25).map((d) => `${DRIVE_SHORT[d.key] ?? d.key}（${driveLevel(d.key, Number(d.value), driveTrend(state, d.key, now))}）`);
   const emotion = emotionSummary(state, now);
   const parts = [];
   if (drives.length) parts.push(drives.join('、'));
