@@ -634,9 +634,9 @@ function normalizeStar(star = {}) {
   };
 }
 
-// 星图是可视化不是全量导出：桶越多，建边(O(pairs))和 payload 越炸。只保留最重的一批
-// ——固化(pinned)优先，其余按权重降序——把负载和总桶数脱钩。total 仍报真实数，网页显示不变。
-const MAX_MAP_STARS = 400;
+// Keep one map response bounded at the Godot client's 20,000-record limit.
+// This preserves a single full read for normal maps without selecting only the top 400.
+const MAX_MAP_STARS = 20_000;
 function capMapStars(stars, max = MAX_MAP_STARS) {
   if (!Array.isArray(stars) || stars.length <= max) return stars;
   return stars
@@ -646,6 +646,9 @@ function capMapStars(stars, max = MAX_MAP_STARS) {
     .map((item) => item.star);
 }
 
+const MAX_MAP_EDGE_PAIR_SCANS = 50_000;
+const MAX_MAP_EDGES = 1_600;
+
 function buildMapEdges(stars, minShared = 3, maxPerNode = 6) {
   const byTag = new Map();
   stars.forEach((star, index) => star.tags.forEach((tag) => {
@@ -653,10 +656,14 @@ function buildMapEdges(stars, minShared = 3, maxPerNode = 6) {
     byTag.get(tag).push(index);
   }));
   const pairs = new Map();
+  let scannedPairs = 0;
+  pair_scan:
   for (const indexes of byTag.values()) {
     if (indexes.length > stars.length * .5) continue;
     for (let left = 0; left < indexes.length; left += 1) {
       for (let right = left + 1; right < indexes.length; right += 1) {
+        if (scannedPairs >= MAX_MAP_EDGE_PAIR_SCANS) break pair_scan;
+        scannedPairs += 1;
         const key = `${indexes[left]}|${indexes[right]}`;
         pairs.set(key, (pairs.get(key) || 0) + 1);
       }
@@ -683,6 +690,7 @@ function buildMapEdges(stars, minShared = 3, maxPerNode = 6) {
       kind: 'tag-derived',
       label: `${candidate.shared} 个共同标签`,
     });
+    if (edges.length >= MAX_MAP_EDGES) break;
   }
   return edges;
 }

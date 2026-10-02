@@ -72,6 +72,7 @@ except ImportError:  # pragma: no cover
 _LOCKED_LETTER_NAME = "一封上锁的信"
 _LOCKED_LETTER_NOTICE = "这封信尚未向你开放。"
 _SIDECAR_BUCKET_ID_RE = re.compile(r"[A-Za-z0-9._-]{1,160}\Z")
+_SIDECAR_BUCKET_MAP_MAX_STARS = 20_000
 
 
 def _require_sidecar_auth(request: Request) -> Response | None:
@@ -204,7 +205,9 @@ def register(mcp) -> None:
             return JSONResponse({
                 "stats": stats,
                 "total": len(stars),
-                "stars": stars[:800],
+                # Keep this one-response projection aligned with the Godot client bound;
+                # ordinary maps are returned in full, while larger maps retain true total.
+                "stars": stars[:_SIDECAR_BUCKET_MAP_MAX_STARS],
             })
         except Exception:
             logger.exception("sidecar bucket map failed")

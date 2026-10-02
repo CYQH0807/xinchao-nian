@@ -74,7 +74,7 @@
 这两个接口不是给外部 Agent 的 MCP 方法，只供同一 Docker 网络里的心潮 sidecar 使用，均要求
 `OMBRE_MCP_SERVICE_TOKEN` 的 Bearer token：
 
-- `GET /api/bucket-map`：最多返回 800 条元数据星表，不返回正文、`content_preview` 或 `why_remembered`。
+- `GET /api/bucket-map`：单次返回最多 20,000 条元数据星表，不返回正文、`content_preview` 或 `why_remembered`；`total` 保留真实记录数。
 - `GET /api/bucket-preview/{bucket_id}`：只返回指定桶最多 7 行非空正文，且拒绝归档桶和非法 ID。
 
 ## 本地数据范围
