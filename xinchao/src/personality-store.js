@@ -1,3 +1,6 @@
+// 【引擎】人格内核：月度自我回顾写下的性格维度，换算成各驱力的长期偏置。详见 docs/PERSONALITY-CORE.md。
+// 代码地图见 src/README.md。
+
 import { chmod, mkdir, readFile, rename, stat, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { randomUUID } from 'node:crypto';
@@ -23,15 +26,14 @@ export const PERSONALITY_DIMENSIONS = Object.freeze([
 ].map(([key, label]) => Object.freeze({ key, label })));
 
 const CORE_TO_DRIVES = Object.freeze({
-  '爱与依恋': { drives: ['possess', 'crave'], direction: 1 },
+  '爱与依恋': { drives: ['possess'], direction: 1 },
   '表达': { drives: ['share'], direction: 1 },
-  '平静与安全': { drives: ['grieve', 'monitor'], direction: -1 },
+  '平静与安全': { drives: ['grieve', 'monitor', 'favored'], direction: -1 },
   '欲望与动机': { drives: ['libido', 'curiosity'], direction: 1 },
 });
 
 export const NEUTRAL_DRIVE_BIAS = Object.freeze({
   possess: 1,
-  crave: 1,
   share: 1,
   grieve: 1,
   monitor: 1,
@@ -115,7 +117,13 @@ function normalizeSnapshot(input = {}) {
 }
 
 export function normalizePersonalityCore(input = {}, source = 'private-state') {
-  const dimensions = normalizeDimensions(input.dimensions ?? input.core ?? input.scores ?? input);
+  // Legacy flat maps contain scored dimension objects. Metadata-only files
+  // (e.g. an anchor saved before the first assessment) are not assessments.
+  const legacyDimensions = Array.isArray(input) ? input : Object.fromEntries(
+    Object.entries(input).filter(([, value]) => value && typeof value === 'object'
+      && !Array.isArray(value) && Object.hasOwn(value, 'score')),
+  );
+  const dimensions = normalizeDimensions(input.dimensions ?? input.core ?? input.scores ?? legacyDimensions);
   const history = Array.isArray(input.history ?? input.snapshots)
     ? (input.history ?? input.snapshots).map(normalizeSnapshot).filter((item) => item.dimensions.length)
     : [];

@@ -1,3 +1,6 @@
+// 【记忆（OB）】和 Ombre Brain 记忆服务打交道：拉浮现的记忆、写回、解析记忆桶。部署时 OB 要先起来。
+// 代码地图见 src/README.md。
+
 import { SYSTEM_VERSION } from './version.js';
 
 // 梦不吃技术：这些域的记忆不进梦的原料（机房梦就是这么来的）
@@ -44,10 +47,7 @@ export class OmbreClient {
             clientInfo: { name: 'xinchao-dynamic-mind', version: SYSTEM_VERSION },
           },
         });
-        // Ombre v3.6.3 serves stateless JSON MCP and therefore may omit the
-        // session header; stateful MCP servers still keep working when they
-        // return one.  The request method already adds the header only when
-        // present, so both transports can share the same client.
+        // OB 2.8.5+ 的 Streamable HTTP 是无状态 JSON 响应，不发 Mcp-Session-Id；没有就按无状态走，不当错误。
         this.stateless = !this.sessionId;
         await this.post({ jsonrpc: '2.0', method: 'notifications/initialized' }, false);
       })().finally(() => { this.initializePromise = null; });
@@ -69,14 +69,11 @@ export class OmbreClient {
     throw new Error('Ombre MCP call failed after session refresh');
   }
 
-  // 后台 hold worker 专用：执行完整 Ombre hold，并把人类可读回执解析成 bucket id。
   async hold(args = {}, timeoutMs = this.config.holdTimeoutMs ?? 120000) {
     const raw = await this.call('hold', args, timeoutMs);
     const payload = raw?.result ?? raw;
     const text = extractText(raw);
-    if (payload?.isError || raw?.isError) {
-      throw new Error(text || 'ombre_hold_failed');
-    }
+    if (payload?.isError || raw?.isError) throw new Error(text || 'ombre_hold_failed');
     const ombreBucketId = parseHoldBucketId(text);
     if (!ombreBucketId) throw new Error('ombre_hold_missing_bucket_id');
     return { ombreBucketId, responseText: text };
@@ -114,15 +111,14 @@ export class OmbreClient {
     return materialWithRefs(extractText(result), 10000);
   }
 
-  async daytimeMaterial(drives = [], emotion = null, now = new Date()) {
-    return (await this.daytimeMaterialWithRefs(drives, emotion, now)).text;
+  async daytimeMaterial(drives = [], emotion = null) {
+    return (await this.daytimeMaterialWithRefs(drives, emotion)).text;
   }
 
-  // 自动召回不再把描述性"指令"当 query 发给 OB，避免检索旧条目或沉底桶；改走 Ombre 3.6.3 的无 query 浮现路径，限最近两周。
-  // 本地 breath_advanced 不支持 mode / with_ids；无 query 已走 spontaneous 浮现策略，桶 ID 直接从正文表头解析。
+  // 2026-09-07 改：不再把一段"指令"当 query 发给 OB，避免命中旧条目或沉底桶。
+  // 本地 Ombre 3.6.3 无 query 时走 spontaneous 浮现策略；date_from 限最近两周。
   // 驱力标签不再拼进 query，只保留情绪坐标做共振排序。
-  // 3.3.9：exclude = 最近浮现过的桶。Ombre 3.6.3 没有排除参数，所以多取几条，
-  // 在客户端按 bucket_id 剔除后，再收回原来的条数；保留本地无 query 的工具契约。
+  // 3.3.9：exclude = 最近浮现过的桶。OB 没有排除参数，所以多要几条，本地剔掉再取回原来的条数。
   async daytimeMaterialWithRefs(drives = [], emotion = null, now = new Date(), exclude = []) {
     const want = Number(this.config.breathMaxResults) || 3;
     const result = await this.call('breath_advanced', {
@@ -135,8 +131,8 @@ export class OmbreClient {
   }
 
   // 自主念头用的材料：比日间浮现更短，只要能让念头落到具体的事上。
-  async thoughtMaterial(drives = [], emotion = null, now = new Date()) {
-    return (await this.thoughtMaterialWithRefs(drives, emotion, now)).text;
+  async thoughtMaterial(drives = [], emotion = null) {
+    return (await this.thoughtMaterialWithRefs(drives, emotion)).text;
   }
 
   async thoughtMaterialWithRefs(drives = [], emotion = null, now = new Date(), exclude = []) {
@@ -296,8 +292,6 @@ export class OmbreClient {
     if (!this.config.writeEnabled) throw new Error('ombre_write_disabled');
     const content = String(item?.content ?? '').trim();
     if (!content) throw new Error('box_content_empty');
-    // Ombre v3.6.3 rejects legacy source/auto fields; grow only accepts its
-    // documented content/items/test_data contract.
     const result = await this.call('grow', {
       content,
     });
@@ -409,11 +403,8 @@ export function parseSurfacedDomains(text) {
 // 只取表头里的 ID，不从正文猜，避免把记忆里偶然出现的字符串误当成来源桶。
 // 老版 OB 没有这个元数据时返回空数组，不影响旧调用者。
 /**
- * 3.3.9：按桶切开浮现文本，去掉 exclude 里的桶，最多保留 keep 段。
- *
- * 上游新协议用 [权重:...] 标识浮现段，但本地 Ombre 3.6.3 的无 query
- * 输出只有 [bucket_id:...]。这里按 bucket_id 兼容两种表头，并保留
- * [核心准则] 段；准则不算入 keep，也不会被冷却列表误删。
+ * 3.3.9：按 bucket_id 切分浮现结果，兼容公开权重表头和本地 Ombre 3.6.x 表头，
+ * 并始终保留核心准则块。核心准则不计入 keep，也不会被冷却列表误删。
  */
 export function dropBuckets(text, exclude = [], keep = Infinity) {
   const src = String(text ?? '');
@@ -424,21 +415,13 @@ export function dropBuckets(text, exclude = [], keep = Infinity) {
   let match;
   while ((match = re.exec(src)) !== null) starts.push({ index: match.index, id: match[1] });
   if (!starts.length) return src;
-
-  const records = starts.map((start) => ({
-    ...start,
-    recordStart: src.lastIndexOf('\n', start.index) + 1,
-  }));
+  const records = starts.map((start) => ({ ...start, recordStart: src.lastIndexOf('\n', start.index) + 1 }));
   const head = src.slice(0, records[0].recordStart);
   const blocks = records.map((start, index) => {
     const end = index + 1 < records.length ? records[index + 1].recordStart : src.length;
     const lineEnd = src.indexOf('\n', start.recordStart);
     const header = src.slice(start.recordStart, lineEnd < 0 ? src.length : lineEnd);
-    return {
-      id: start.id,
-      text: src.slice(start.recordStart, end),
-      core: /\[核心准则\]/.test(header),
-    };
+    return { id: start.id, text: src.slice(start.recordStart, end), core: /\[核心准则\]/.test(header) };
   });
   let remaining = Number.isFinite(keep) ? Math.max(0, Number(keep)) : Infinity;
   const kept = blocks.filter((block) => {
@@ -466,7 +449,6 @@ export function parseSurfacedBucketIds(text) {
 }
 
 const RECENT_WINDOW_DAYS = 14;
-// Return an inclusive YYYY-MM-DD lower bound for a recent-memory window.
 function daysAgo(now, days) { return new Date(now.getTime() - days * 86_400_000).toISOString().slice(0, 10); }
 
 // 把 OB 输出里不该当原料的块去掉：已沉底（"已删除到档案"）的桶、with_ids 追加的 json 尾块、预算不足提示行。
@@ -511,7 +493,6 @@ export function parseGrowBucketIds(text) {
   return ids;
 }
 
-// hold 的普通、feel、pinned 分支都用“→bucket_id”回执；保留旧版纯十六进制回执兼容。
 export function parseHoldBucketId(text) {
   return parseGrowBucketIds(text)[0]
     ?? String(text ?? '').match(/(?:bucket[_ ]?id\s*[:=]\s*|\b)([a-f0-9]{12,160})\b/i)?.[1]
@@ -634,8 +615,8 @@ function normalizeStar(star = {}) {
   };
 }
 
-// Keep one map response bounded at the Godot client's 20,000-record limit.
-// This preserves a single full read for normal maps without selecting only the top 400.
+// 星图是可视化不是全量导出：桶越多，建边(O(pairs))和 payload 越炸。只保留最重的一批
+// ——固化(pinned)优先，其余按权重降序——把负载和总桶数脱钩。total 仍报真实数，网页显示不变。
 const MAX_MAP_STARS = 20_000;
 function capMapStars(stars, max = MAX_MAP_STARS) {
   if (!Array.isArray(stars) || stars.length <= max) return stars;

@@ -3,8 +3,24 @@ import assert from 'node:assert/strict';
 import { handleMcpMessage, OB_PROXY_TOOLS } from '../src/mcp-protocol.js';
 import { gateMcpSelfReport } from '../src/interaction-policy.js';
 import { SYSTEM_VERSION } from '../src/version.js';
+import { computePersonalityStats, normalizePersonalityCore } from '../src/personality-store.js';
 
 const request = (method, params = {}) => ({ jsonrpc: '2.0', id: 1, method, params });
+
+test('personality MCP reports no assessment and still exposes independent anchors', async () => {
+  const core = normalizePersonalityCore({ schemaVersion: 1, anchors: [{ key: 'boundary', label: '底线' }] });
+  const result = await handleMcpMessage(request('tools/call', {
+    name: 'xinchao_personality_stats', arguments: { include_reasons: false },
+  }), { personalityStats: async () => ({ stats: computePersonalityStats(core), core }) });
+  const payload = result.body.result;
+  assert.equal(payload.isError, false);
+  assert.match(payload.content[0].text, /尚无可用.*自评/u);
+  assert.doesNotMatch(payload.content[0].text, /均值|schemaVersion70|anchors70/u);
+  assert.equal(payload.structuredContent.available, false);
+  assert.equal(payload.structuredContent.dimensionCount, 0);
+  assert.deepEqual(payload.structuredContent.dimensions, []);
+  assert.equal(payload.structuredContent.anchors[0].label, '底线');
+});
 
 test('MCP handshake reports the shared runtime version', async () => {
   const result = await handleMcpMessage(request('initialize', {
@@ -54,6 +70,7 @@ test('tools/list keeps Xinchao, board and curated OB tools together', async () =
       name,
       description: `live schema for ${name}`,
       inputSchema: { type: 'object', properties: { live: { type: 'boolean' } } },
+      ...(name === 'trace' ? { annotations: { destructiveHint: true } } : {}),
     }));
   const result = await handleMcpMessage(request('tools/list'), {
     boardEnabled: true,
@@ -78,9 +95,10 @@ test('tools/list keeps Xinchao, board and curated OB tools together', async () =
   for (const name of liveObTools.map((tool) => tool.name)) {
     assert.ok(names.includes(name), `missing OB tool ${name}`);
   }
-  const breathSearch = result.body.result.tools.find((tool) => tool.name === 'breath_search');
-  assert.equal(breathSearch.description, 'live schema for breath_search');
-  assert.equal(breathSearch.title, '检索记忆');
+  const breath = result.body.result.tools.find((tool) => tool.name === 'breath');
+  assert.equal(breath.title, '浮现记忆');
+  assert.match(breath.description, /长期记忆自然浮现/);
+  assert.equal(breath.inputSchema.properties.live.type, 'boolean');
   const trace = result.body.result.tools.find((tool) => tool.name === 'trace');
   assert.equal(trace.annotations.destructiveHint, true);
   assert.equal(names.includes('purge'), false);

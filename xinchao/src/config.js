@@ -1,3 +1,6 @@
+// 【服务底座】读环境变量：所有可调的开关和数值都从 .env 进来，对照 .env.example 看。
+// 代码地图见 src/README.md。
+
 function bool(name, fallback = false) {
   const raw = process.env[name];
   return raw == null ? fallback : ['1', 'true', 'yes', 'on'].includes(raw.toLowerCase());
@@ -55,9 +58,9 @@ export function loadConfig() {
       writeEnabled: bool('OMBRE_WRITE_ENABLED', false),
       breathMaxResults: number('OMBRE_BREATH_MAX_RESULTS', 3, 1, 10),
       breathMaxTokens: number('OMBRE_BREATH_MAX_TOKENS', 800, 200, 3000),
-      // 3.3：把此刻情绪坐标带给 breath（共振排序）和没自带坐标的 hold（情感标签）。
       holdTimeoutMs: number('OMBRE_HOLD_TIMEOUT_MS', 120000, 5000, 300000),
       holdQueuePollSeconds: number('OMBRE_HOLD_QUEUE_POLL_SECONDS', 2, 1, 60),
+      // 3.3：把此刻情绪坐标带给 breath（共振排序）和没自带坐标的 hold（情感标签）。
       emotionStamp: bool('OMBRE_EMOTION_STAMP', true),
     },
     context: {
@@ -97,8 +100,9 @@ export function loadConfig() {
     },
     interaction: {
       maxEffectsPerDay: number('INTERACTION_MAX_EFFECTS_PER_DAY', 24, 1, 96),
-      classifyMinMinutes: number('INTERACTION_CLASSIFY_MIN_MINUTES', 8, 1, 240),
-      // 3.3.4：MCP 客户端直接填的 interaction_type 只认四种自我动作；关系类需提供对方参与的 exchange 内容供服务端判断。
+      classifyMinMinutes: number('INTERACTION_CLASSIFY_MIN_MINUTES', 8, 1, 240),   // 3.3.8：服务端替判互动类型的节流，和客户端钩子那边一起拧（09-19 她要双向节流）
+      // 3.3.4：MCP（他自己的窗口）直接填的 interaction_type 只认四种自我动作（sharing/reflection/task_progress/discovery）；
+      // 关系类（陪伴/安抚/亲密/冲突/和好…）得给 exchange 让服务端从她的话里判，防止他自己说"她安抚了我"就把驱力放掉。
       mcpSelfReportGate: bool('MCP_SELF_REPORT_GATE', true),
       timeZone: process.env.INTERACTION_TIME_ZONE ?? process.env.SETTLE_TIME_ZONE ?? 'Asia/Shanghai',
     },
@@ -169,7 +173,8 @@ export function loadConfig() {
       minIntervalHours: number('DAYTIME_MIN_INTERVAL_HOURS', 2, 0.25, 24),
       maxIntervalHours: number('DAYTIME_MAX_INTERVAL_HOURS', 3, 0.25, 24),
       maxPerDay: number('DAYTIME_MAX_PER_DAY', 7, 1, 24),
-      // 3.3：默认不再让模型代笔 Bark 给对方；浮现的记忆进念头池，反复浮现长成持续念头后经自身信号递给 AI，说不说由 AI 自己定
+      // 默认只进念头池：模型开启时形成内在念头，关闭/失败时保留记忆摘句。
+      // 反复浮现长成持续念头后经自身信号递给 AI，说不说由 AI 自己定。
       bark: bool('DAYTIME_BARK_ENABLED', false),
     },
     // 输出回流：他说出口的自主表达回过头在思维池里留痕。默认开——闭环的第一块。
@@ -183,13 +188,13 @@ export function loadConfig() {
       nudge: number('MEMORY_RESONANCE_NUDGE', 0.02, 0.005, 0.1),
       perCallCap: number('MEMORY_RESONANCE_PER_CALL_CAP', 0.06, 0.01, 0.3)
     },
-    // 作息预期：从对方真实到达的节律学习，临近对方常来的时段生出"在等你"的期待感（只表达守候，不责备）。
+    // 作息预期：从她真实到达的节律学习，临近她常来的时段生出"在等你"的期待感（只表达守候，不责备）。
     anticipation: {
       enabled: bool('ANTICIPATION_ENABLED', true),
       arrivalGapMinutes: number('ANTICIPATION_ARRIVAL_GAP_MINUTES', 90, 15, 720)
     },
-    // 挂念：作息预期的另一半。对方过了常来的点还没来 → 轻推 monitor(惦记)，硬顶在 3A 天花板内、
-    // 不自激；只在对方活跃时段念，静默时段(在睡)不念。失落内化，绝不责备。
+    // 挂念：作息预期的另一半。她过了常来的点还没来 → 轻推 monitor(牵挂)，硬顶在 3A 天花板内、
+    // 不自激；只在她活跃时段念，静默时段(在睡)不念。失落内化，绝不责备。
     longing: {
       enabled: bool('LONGING_ENABLED', true),
       nudge: number('LONGING_NUDGE', 0.02, 0.005, 0.1),

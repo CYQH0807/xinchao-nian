@@ -6,3 +6,5 @@ xinchao/state/
 node_modules/
 .pnpm-store/
 pnpm-lock.yaml
+xinchao/configs/interaction-rules.json
+xinchao/configs/attention-rules.json

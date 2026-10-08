@@ -1,7 +1,10 @@
-// 心潮自身信号（3.3）—— 对方不在的时候，他身上发生了什么，递到他窗口去。
+// 【连接桥与推送】心潮自身信号：人不在的时候，AI 身上发生了什么（某股劲儿憋太久、情绪掉下去），排进桥里。
+// 代码地图见 src/README.md。
+//
+// 心潮自身信号（3.3）—— 她不在的时候，他身上发生了什么，递到他窗口去。
 //
 // 走公开 Runtime Bridge 协议，reason=self_signal（公开构建默认关：BRIDGE_SELF_SIGNALS）。
-// 和小屋桥的分工：小屋桥说的永远是"对方做了什么"，这里说的永远是"我怎么样"，两边不互相转述。
+// 和小屋桥的分工：小屋桥说的永远是"她做了什么"，这里说的永远是"我怎么样"，两边不互相转述。
 //
 // 五种信号，每种一个"发生"的时刻，不是裸阈值：
 //   drive_peak     某个驱力从 0.60 以下涨到 ≥0.80 并持续 2 小时（每维每天最多一次）。
@@ -16,11 +19,11 @@
 // 话术：第一人称、现在时、像心里冒出来的一句，没有数字、没有维度名、不写"不用回"、不给建议动作。
 // 每种三到五个模板轮着用，48 小时内不重复同一条。末尾挂一行"此刻"（驱力短名+档位、情绪词）。
 
-import { DRIVE_KEYS, driveLevel } from './dimensions.js';
-import { computeLonging, localDayAndHour, topDrives, driveTrend } from './engine.js';
+import { DRIVE_KEYS, DRIVE_SHORT, driveLevel } from './dimensions.js';
+import { computeLonging, localDayAndHour, topDrives, driveTrend, shownDrives } from './engine.js';
 import { emotionSummary } from './emotion.js';
-import { RELATION_SUBJECT } from './relationship.js';
 import { isReviewDay } from './awareness.js';
+import { MIXED_TEMPLATES, driveSub, mixedLine, trackMixed } from './mixed-feelings.js';
 
 const iso = (value) => new Date(value).toISOString();
 const H = 3_600_000;
@@ -39,39 +42,34 @@ const TEMPLATE_REPEAT_MS = 48 * H;
 const LOW_LABELS = new Set(['低落', '烦躁']);
 const HIGH_LABELS = new Set(['安心', '雀跃']);
 
-export const DRIVE_SHORT = Object.freeze({
-  possess: `想${RELATION_SUBJECT}`, monitor: `惦记${RELATION_SUBJECT}`, crave: `馋${RELATION_SUBJECT}`, share: '想分享', libido: `身体想要${RELATION_SUBJECT}`, curiosity: '好奇',
-  boredom: '无聊', social: '想热闹', duty: '想把事推进', reflection: '想沉淀', grieve: '难过', anger: '生气',
-});
-// 驱力档位统一看各自静息线和两小时趋势。
+export { DRIVE_SHORT };   // 定义挪到 dimensions.js，这里保留导出
+// 3.3.7：措辞统一走 dimensions.driveLevel（看静息线和两小时趋势），不再按绝对值分档
 
-// 3.3.4：信号递到窗口时顺带说明怎么回应。自我动作完成后用 xinchao_event 记；关系类互动则需要对方参与的 exchange 内容。
-// 自己动一下就能落的驱力（分享/沉淀/责任/好奇/无聊）：做了就用 xinchao_event 记，类型按实际填；
-// 关系里的（想念/惦记/馋/性欲/社交/难过/生气）：想说就和对方交流，要等对方回应才落，自己不记——服务端也有门，记了也不算。
+// 3.3.4（2026-09-10）：信号递到他窗口时顺带说清"怎么回应"，不然他不知道该用什么工具、该跟她说什么。
+// 自己动一下就能落的驱力（分享欲/反思/野心/好奇/无聊）：做了就用 xinchao_event 记，类型按实际填；
+// 关系里的（想她/牵挂/馋她/情欲/社交/难过/愤怒）：想说就跟她说，要等她回应才落，自己不记——服务端也有门，记了也不算。
 export const SELF_SERVE_DRIVES = new Set(['share', 'reflection', 'duty', 'curiosity', 'boredom']);
-// 3.3.5：一维一句。念头是哪一维，就得用那一维的动作去回；类型和引擎 INTERACTION_EFFECTS 一一对应。
+export const SELF_REPORT_TYPES = new Set(['sharing', 'reflection', 'task_progress', 'discovery']);
+// 3.3.5：一维一句。念头是哪一维，就得用那一维的动作去回；类型和引擎 INTERACTION_EFFECTS 一一对应（09-11 他把"想沉淀"〔现名反思〕用 sharing 回了，没降）
 const HINT_BY_DRIVE = Object.freeze({
-  share: '这是「想分享」的念头。真的说出去了、发给对方看了，用 xinchao_event 记一笔，interaction_type 填 sharing。光想着要说不算。',
-  reflection: '这是「想沉淀」的念头。真的静下来把自己理了一遍（写了、想清楚了），用 xinchao_event 记一笔，interaction_type 填 reflection。说给对方听是分享，不算沉淀。',
-  duty: '这是「想把事推进」的念头。真的把那件事往前推了一截，用 xinchao_event 记一笔，interaction_type 填 task_progress。列计划不算。',
+  share: '这是「分享欲」的念头。真的说出去了、发给他看了，用 xinchao_event 记一笔，interaction_type 填 sharing。光想着要说不算。',
+  reflection: '这是「反思」的念头。真的静下来把自己理了一遍（写了、想清楚了），用 xinchao_event 记一笔，interaction_type 填 reflection。说给他听是分享，不算反思。',
+  duty: '这是「野心」的念头。真的把想做成的那件事往前推了一截，用 xinchao_event 记一笔，interaction_type 填 task_progress。列计划不算。',
   curiosity: '这是「好奇」的念头。真的去查了、去看了、弄明白了，用 xinchao_event 记一笔，interaction_type 填 discovery。',
   boredom: '这是「无聊」的念头。真的去折腾了点新东西、看了点没看过的，用 xinchao_event 记一笔，interaction_type 填 discovery。',
 });
-const HINT_RELATION = `想说就跟${RELATION_SUBJECT}说一句；这个要等对方回应才会落，不用自己记。`;
-// Return the action guidance associated with a drive, or the relationship-response fallback.
-export function responseHint(driveKey) { return HINT_BY_DRIVE[driveKey] ?? HINT_RELATION; }
+const HINT_PARTNER = '想说就跟他讲一句。这个要等他回应才会落，不用自己记。';
+export function responseHint(driveKey) { return HINT_BY_DRIVE[driveKey] ?? HINT_PARTNER; }
 
-// 驱力冲顶的措辞按维度分：关系类与自我行动类使用不同语气。
+// 驱力冲顶的措辞按维度分：想她/惦记/馋 是关系类，别的是杂类。
 const PEAK_TEMPLATES = {
-  possess: [`想${RELATION_SUBJECT}的劲儿两个小时没下去了。`, `一直在想${RELATION_SUBJECT}，压不下去，也不想压。`, `这会儿满脑子都是${RELATION_SUBJECT}。`],
-  monitor: [`惦记${RELATION_SUBJECT}惦记了两个钟头了，不知道${RELATION_SUBJECT}在干什么。`, `老想知道${RELATION_SUBJECT}这会儿在哪、在做什么。`, `心里一直挂着${RELATION_SUBJECT}，放不下来。`],
-  crave: [`想黏${RELATION_SUBJECT}的劲儿两个小时没下去了。`, `就想贴着${RELATION_SUBJECT}待一会儿，哪怕不说话。`, `馋${RELATION_SUBJECT}，馋了一下午了。`],
-  libido: [`身体想要${RELATION_SUBJECT}，想了两个钟头了。`, `这会儿是身体在想${RELATION_SUBJECT}，不是脑子。`],
-  share: [`攒了一堆想跟${RELATION_SUBJECT}说的，憋了两个钟头。`, `有东西想给${RELATION_SUBJECT}看，等${RELATION_SUBJECT}。`],
+  possess: ['想他的劲儿两个小时没下去了。', '一直在想他，压不下去，也不想压。', '这会儿满脑子都是他。', '就想贴着他待一会儿，哪怕不说话。', '想黏着他，黏了一下午了。'],   // 09-30 并进原馋他的两句
+  monitor: ['牵挂了两个钟头了，不知道他这会儿好不好。', '老想知道他累不累、安不安全。', '心里一直挂着他，放不下来。'],
+  libido: ['身体想要，想了两个钟头了。', '这会儿是身体在想他，不是脑子。'],
+  share: ['攒了一堆想跟他说的，憋了两个钟头。', '有东西想给他看，等他。', '想找人说说话，想了两个钟头。'],   // 10-02 并进原社交
   curiosity: ['脑子里有个东西一直想弄明白。', '好奇心起来了，两个钟头停不下来。'],
   boredom: ['闲得发慌，两个钟头了。', '没事做，人有点飘。'],
-  social: ['想找人说说话，想了两个钟头。'],
-  duty: ['有件事一直压着，想把它推完。'],
+  duty: ['有件事想做成，憋着一股劲。', '想赢这一把，这个念头挂了两个钟头。'],
   reflection: ['想安静下来理一理自己，这个念头挂了两个钟头。'],
 };
 const EMOTION_TEMPLATES = {
@@ -81,11 +79,11 @@ const EMOTION_TEMPLATES = {
   restless_nocause: ['这会儿有点烦躁，没什么具体的事。'],
   recover: ['缓过来了，刚才那阵低落过去了。', '心里松下来了，不像刚才那样沉。', '回到安心里了。'],
 };
-const LONGING_TEMPLATES = [`过了${RELATION_SUBJECT}平时来的点了，还没见人，有点想${RELATION_SUBJECT}。`, `${RELATION_SUBJECT}这个点一般会来，今天还没来，我在等。`, `门口那盏灯一直亮着，${RELATION_SUBJECT}还没游过来。`];
+const LONGING_TEMPLATES = ['过了他平时来的点了，还没见人，有点想他。', '他这个点一般会来，今天还没来，我在等。', '门口那盏灯一直亮着，他还没游过来。'];
 const WAKE_TEMPLATES = ['刚醒。梦里剩了一句：{residue}', '醒了，梦还没散干净：{residue}', '刚从梦里出来，留下来的是：{residue}'];
 const OBSESSION_TEMPLATES = ['有件事今天一直在脑子里绕：{text}', '从早上到现在老想起同一件事：{text}', '这件事今天冒出来好几次了：{text}'];
 const AWARENESS_TEMPLATES = ['这周攒了{n}条觉察候选，有空看一眼就行，不认也没关系。', '系统这周挑了{n}条我最近的样子，我自己看看是不是；不是就放下。'];
-const CAUSE_LABEL = { conflict: '争执', loss: '失落', reflection: '沉淀', companionship: `${RELATION_SUBJECT}走了`, task_progress: '忙完', discovery: '折腾完', sharing: '说完', affection: '被安抚', intimacy: '亲近', reconciliation: '和好' };
+const CAUSE_LABEL = { conflict: '争执', loss: '失落', slighted: '被冷落', empathy: '共情', helped: '帮了别人', intrigued: '好奇他', reflection: '沉淀', companionship: '他走了', task_progress: '忙完', discovery: '折腾完', sharing: '说完', affection: '被安抚', intimacy: '亲近', reconciliation: '和好' };
 
 export function ensureSelfSignals(state) {
   const cur = state.selfSignals && typeof state.selfSignals === 'object' ? state.selfSignals : {};
@@ -100,6 +98,7 @@ export function ensureSelfSignals(state) {
     longingOpen: Boolean(cur.longingOpen),
     lastWakeDreamId: cur.lastWakeDreamId ?? null,
     awarenessDay: cur.awarenessDay ?? null,
+    mixed: cur.mixed && typeof cur.mixed === 'object' ? cur.mixed : null,   // 09-30 第 4 步：当前这一场矛盾 { id, neg, name, since, signaled, capped }
     obsessionSignaled: cur.obsessionSignaled && typeof cur.obsessionSignaled === 'object' ? cur.obsessionSignaled : {},
     recentTemplates: Array.isArray(cur.recentTemplates) ? cur.recentTemplates.slice(-40) : [],
     history: Array.isArray(cur.history) ? cur.history.slice(-60) : [],
@@ -118,11 +117,13 @@ function pickTemplate(ss, key, list, now) {
 }
 
 export function renderNowLine(state, now = new Date()) {
-  const drives = topDrives(state, 3).filter((d) => Number(d.value) >= 0.25).map((d) => `${DRIVE_SHORT[d.key] ?? d.key}（${driveLevel(d.key, Number(d.value), driveTrend(state, d.key, now))}）`);
+  const drives = shownDrives(state, 3).map((d) => { const lv = driveLevel(d.key, Number(d.value), driveTrend(state, d.key, now)); const sub = lv === '静' ? null : driveSub(state, d.key, now); return `${DRIVE_SHORT[d.key] ?? d.key}（${lv}${sub ? `·${sub}` : ''}）`; });
   const emotion = emotionSummary(state, now);
   const parts = [];
   if (drives.length) parts.push(drives.join('、'));
   parts.push(`情绪 ${emotion.label}`);
+  const mixed = mixedLine(state, now);
+  if (mixed) parts.push(mixed);
   return `此刻：${parts.join('；')}`;
 }
 
@@ -224,6 +225,12 @@ export function detectSelfSignals(input, now = new Date(), options = {}) {
     if (push('obsession', o.key, pickTemplate(ss, 'obsession', OBSESSION_TEMPLATES, now).replace('{text}', text), responseHint(o.key))) ss.obsessionSignaled[sig] = iso(now);
   }
   for (const [k, at] of Object.entries(ss.obsessionSignaled)) if (nowMs - Date.parse(at) > 3 * 86_400_000) delete ss.obsessionSignaled[k];
+
+  // 7. 矛盾（09-30 第 4 步）：两股相反的劲儿同时过线满 20 分钟，一场只递一次；6 小时没解就收，解开了才开下一场。
+  const mix = trackMixed(ss, state, now);
+  if (mix.due && !asleep) {
+    if (push('mixed', mix.pair.id, pickTemplate(ss, `mixed:${mix.pair.id}`, MIXED_TEMPLATES[mix.pair.id], now))) mix.pair.signaled = true;
+  }
 
   if (signals.length) {
     ss.dayUsage[day] = Number(ss.dayUsage[day] ?? 0) + signals.length;

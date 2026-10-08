@@ -4,17 +4,18 @@
  * describe the same person instead of drifting across separate modules.
  */
 export const RELATION_SUBJECT = '他';
+export const RELATION_SELF = '汐';
 
 /**
- * Return the speaker labels used by the one-hop interaction exchange.
- * The two labels intentionally keep the current Chinese protocol shape while
- * making the relationship subject explicit at the source level.
+ * Return stable protocol roles and the display names used in prompts.
  *
- * @returns {{partner: string, self: string}} Exchange speaker labels.
+ * @returns {{partner: string, self: string, partnerName: string, selfName: string}}
  */
 export function relationExchangeLabels() {
   return {
-    partner: `${RELATION_SUBJECT}说`,
-    self: '他回',
+    partner: 'user',
+    self: 'assistant',
+    partnerName: RELATION_SUBJECT,
+    selfName: RELATION_SELF,
   };
 }

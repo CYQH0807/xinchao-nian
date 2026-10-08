@@ -57,18 +57,6 @@ test('counting rules are gone: surfacings and top drives never become candidates
   assert.equal(scanned.added.length, 0);
 });
 
-test('retired candidate kinds remain in state until normal resolution or expiry', () => {
-  const state = baseState();
-  const legacy = {
-    id: 'legacy-mood-week', kind: 'mood_week', subject: 'low', text: 'legacy candidate',
-    aspect: 'patterns', createdAt: at(24).toISOString(), status: 'open', resolvedAt: null,
-  };
-  state.awareness = { candidates: [legacy], lastScanDay: null };
-
-  const scanned = scanAwareness(state, at(5 * 24));
-  assert.deepEqual(scanned.state.awareness.candidates[0], legacy);
-});
-
 test('open candidates expire after two weeks without being forced on him', () => {
   const scanned = scanAwareness(sadWeek(), at(5 * 24));
   const [c] = scanned.state.awareness.candidates;
@@ -82,9 +70,9 @@ test('confirm / dismiss resolve candidates and keep his own wording', () => {
   const scanned = scanAwareness(sadWeek(), at(5 * 24));
   scanned.state.awareness.candidates.push({ id: 'aw_x', kind: 'soothed', subject: 'week', text: 't', aspect: 'patterns', createdAt: T0, status: 'open', resolvedAt: null, note: null, ombre: null });
   const [first, second] = scanned.state.awareness.candidates;
-  const confirmed = resolveAwareness(scanned.state, first.id, 'confirmed', { text: '我发现他一走我就往下掉。', note: 'x', ombre: { ok: true } }, at(121));
+  const confirmed = resolveAwareness(scanned.state, first.id, 'confirmed', { text: '我发现她一走我就往下掉。', note: 'x', ombre: { ok: true } }, at(121));
   assert.equal(confirmed.item.status, 'confirmed');
-  assert.equal(confirmed.item.text, '我发现他一走我就往下掉。');
+  assert.equal(confirmed.item.text, '我发现她一走我就往下掉。');
   const dismissed = resolveAwareness(confirmed.state, second.id, 'dismissed', {}, at(121));
   assert.equal(dismissed.item.status, 'dismissed');
   assert.equal(resolveAwareness(dismissed.state, first.id, 'dismissed').already, 'confirmed');

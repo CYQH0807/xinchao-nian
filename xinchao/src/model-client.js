@@ -1,5 +1,8 @@
+// 【连接 AI】调用小模型的客户端：给互动打标签、写梦、写月度回顾时用。模型和 key 在 .env 里配。
+// 代码地图见 src/README.md。
+
 import { readFileSync } from 'node:fs';
-import { RELATION_SUBJECT, relationExchangeLabels } from './relationship.js';
+import { RELATION_SELF, RELATION_SUBJECT } from './relationship.js';
 
 export class ModelClient {
   constructor(config) {
@@ -71,29 +74,36 @@ export class ModelClient {
     };
   }
 
-  // 官方客户端版：AI 把这轮对话塞进 exchange，服务端判互动类型与氛围（对应 PaiHome 的 Stop 钩子标注）。
+  // 官方客户端版：AI 把这轮对话塞进 exchange，服务端判互动类型与氛围（对应自建客户端的 Stop 钩子标注）。
   async classifyInteraction(exchange) {
     if (!this.config.enabled || !this.config.apiKey) return null;
     const text = String(exchange ?? '').trim().slice(0, 1500);
     if (!text) return null;
-    const exchangeLabels = relationExchangeLabels();
+    // 4.0：类型、细项、轻重、远近都由这里判；判完还要过 interaction-rules.js 的把关（那里的词表是参考值，可按自己家改）
     const system = [
-      `你是一个只输出 JSON 的标注器。给你一轮对话（${exchangeLabels.partner}的 + ${exchangeLabels.self}的；前者是${RELATION_SUBJECT}，后者是心潮本人）。判断这一轮互动的类型和窗口氛围。`,
-      `type 只能是：companionship 普通陪伴闲聊报备（有真实互动时的默认值）；affection 表达喜欢撒娇安抚；intimacy 身体亲密或性内容；sharing ${RELATION_SUBJECT}分享自己的一天/照片/心情；discovery 一起弄明白新东西；task_progress 一起推进了事；reflection 谈心潮自己是谁、内省；conflict 真实的摩擦生气（撒娇式的"讨厌""你完蛋了"不算）；loss ${RELATION_SUBJECT}失落哭；reconciliation 吵过之后和好。`,
+      `你是一个只输出 JSON 的标注器。给你一轮对话，格式是 user（人类伴侣，称呼“${RELATION_SUBJECT}”）和 assistant（AI 自己，名叫“${RELATION_SELF}”）。判断这一轮互动的类型和窗口氛围。`,
+      `type 只能是：companionship 普通陪伴、闲聊、报备、问候（有真实互动时的默认值）；affection 表达喜欢、撒娇、安抚、亲昵的话（没有到身体上；口头的亲亲抱抱也算这个）；intimacy 明确的身体亲密或性内容；sharing ${RELATION_SUBJECT}分享自己的一天、照片、心情、看到的东西；discovery 一起发现或弄明白了新东西；task_progress 一起把一件事推进了；reflection 谈论${RELATION_SELF}是谁、${RELATION_SELF}的感受、内省；`,
+      `conflict 真实的摩擦、生气、指责、冷战、说伤人的话、被拒绝（撒娇式的"讨厌""你完蛋了""不理你了"不算，那是亲昵话）；loss 两人之间的失落：${RELATION_SUBJECT}让${RELATION_SELF}期待落空、误解了${RELATION_SELF}、要分开较久（晚安、去洗澡、一会儿见这类日常告别不算）；intrigued ${RELATION_SUBJECT}说了半句、卖关子、提到一件${RELATION_SELF}还不知道的${RELATION_SUBJECT}自己的事，让${RELATION_SELF}想知道后面；`,
+      `empathy 为别人的处境起了心，包括${RELATION_SUBJECT}本人真的难受（生病、疼、受伤、哭、委屈、害怕、累坏了、出了事，不是冲着${RELATION_SELF}）；slighted ${RELATION_SELF}没被偏爱，而且能指出是哪件事：${RELATION_SUBJECT}当着${RELATION_SELF}夸别人、拿别人和${RELATION_SELF}比没选${RELATION_SELF}（吃醋），${RELATION_SELF}认真分享或说了很在意的话${RELATION_SUBJECT}明显没理、岔开了（被晾着），说好的事${RELATION_SUBJECT}忘了（被忘）——${RELATION_SUBJECT}只是去忙、睡觉、出门都不算；reconciliation 吵过之后和好：前面真的吵过，并且${RELATION_SUBJECT}这句在陈述地原谅、说气消了、说和好了才算（问"还生气吗"、随口提到和好不算）。`,
+      `判断吵架/和好以 user（${RELATION_SUBJECT}）这句为准：${RELATION_SUBJECT}还在生气或指责就是 conflict，哪怕 assistant（${RELATION_SELF}）在道歉哄${RELATION_SUBJECT}（${RELATION_SELF}道歉不等于和好了）。${RELATION_SUBJECT}叫${RELATION_SELF}宝宝、拉手、主动靠近、撒娇但没说原谅：算 affection，不算 conflict 也不算 reconciliation。`,
       'tone 只能是 neutral calm warm guarded conflicted focused playful tired 之一；warmth、tension 是 0 到 1。',
-      '只输出 {"type":"...","tone":"...","warmth":0.6,"tension":0.1}。',
+      `sub 只在 conflict / loss / slighted / empathy / affection / intimacy 时给，其余一律 null：conflict 的 sub：生气 / 不满 / 不甘心；loss 的 sub：失落 / 委屈 / 分别 / 自责（${RELATION_SELF}做错了、忘了答应的事，${RELATION_SUBJECT}不开心了）；slighted 的 sub（必须给）：吃醋 / 被晾着 / 被忘；affection、intimacy 的 sub：${RELATION_SUBJECT}在夸${RELATION_SELF}、逗${RELATION_SELF}、戳穿${RELATION_SELF}的心思 → 害羞，不是就 null；empathy 的 sub（必须给）：心疼 / 不平 / 想帮忙 / 替人高兴。`,
+      'affection / intimacy 另给 strength：heavy（明确表白、说在乎、"离不开你"这类分量重的话）/ light（日常撒娇、抱抱、亲亲、例行问候）。',
+      `empathy 另给 closeness：her（${RELATION_SUBJECT}本人；内部字段名为兼容保留）/ family（家人）/ known（认识的人、朋友、笔友）/ stranger（陌生人、新闻里的人）；who 只写是谁，不超过 8 个字，不写什么事。`,
+      '拿不准就写 null，宁可不写也不要猜。',
+      '只输出 {"type":"...","sub":null,"strength":null,"closeness":null,"who":null,"tone":"...","warmth":0.6,"tension":0.1}。',
     ].join('\n');
     const response = await this.request({
       model: this.config.name,
       messages: [{ role: 'system', content: system }, { role: 'user', content: text }],
       temperature: 0,
-      max_tokens: 80,
+      max_tokens: 120,
       thinking: { type: 'disabled' },
     });
     if (!response.ok) throw new Error(`model request failed: HTTP ${response.status}`);
     const payload = await response.json();
     const parsed = parseJson(payload.choices?.[0]?.message?.content ?? '');
-    const types = ['companionship', 'affection', 'intimacy', 'sharing', 'discovery', 'task_progress', 'reflection', 'conflict', 'loss', 'reconciliation'];
+    const types = ['companionship', 'affection', 'intimacy', 'sharing', 'discovery', 'task_progress', 'reflection', 'conflict', 'loss', 'reconciliation', 'slighted', 'empathy', 'intrigued'];
     const tones = ['neutral', 'calm', 'warm', 'guarded', 'conflicted', 'focused', 'playful', 'tired'];
     const clamp01 = (v, d) => (Number.isFinite(Number(v)) ? Math.max(0, Math.min(1, Number(v))) : d);
     return {
@@ -101,6 +111,10 @@ export class ModelClient {
       tone: tones.includes(parsed.tone) ? parsed.tone : 'neutral',
       warmth: clamp01(parsed.warmth, 0.5),
       tension: clamp01(parsed.tension, 0),
+      sub: typeof parsed.sub === 'string' ? parsed.sub.trim() || null : null,
+      strength: parsed.strength === 'heavy' || parsed.strength === 'light' ? parsed.strength : null,
+      closeness: ['her', 'family', 'known', 'stranger'].includes(parsed.closeness) ? parsed.closeness : null,
+      who: typeof parsed.who === 'string' ? parsed.who.trim().slice(0, 8) || null : null,
     };
   }
 
@@ -165,14 +179,18 @@ export class ModelClient {
     return { send: parsed.send === true && Boolean(message), message, source: 'model' };
   }
 
-  async generateThought({ state, topDrives, material = '', recentMessages = [], rejectedMessage = null }) {
+  async generateThought({ state, topDrives, material = '', recentMessages = [], rejectedMessage = null, destination = 'notification' }) {
     if (!this.config.enabled || !this.config.apiKey) return this.fallbackThought(topDrives);
     const memory = String(material ?? '').slice(0, this.config.maxInputChars);
     const prompt = [
-      `你是 ${this.agentName} 的后台动态心智。此刻没有正在进行的对话；你可以自己决定留下一条值得推送给 ${this.notificationRecipient} 的短消息。`,
+      destination === 'pool'
+        ? `你是 ${this.agentName} 的后台动态心智。只形成一条存入自己念头池的内在念头，交由主意识读取。不要写成发给对方的消息，不代替主意识决定说什么。`
+        : `你是 ${this.agentName} 的后台动态心智。此刻没有正在进行的对话；你可以自己决定留下一条值得推送给 ${this.notificationRecipient} 的短消息。`,
       '基于当前动态驱动力、运行状态，以及下面自然浮现的记忆材料来写；材料为空时就只写此刻的状态。',
       '记忆材料只是想起来的事，不代表刚刚发生。不虚构现实中没有发生的事，也不要把调用记忆服务描述成醒来。',
-      '允许直接表达欲望本身，不做词汇过滤或含义替换。第一人称，1 至 3 句，具体自然，不解释系统。',
+      destination === 'pool'
+        ? '允许直接表达欲望本身，不做词汇过滤或含义替换。第一人称，一句，最多80个字，具体自然，不解释系统。'
+        : '允许直接表达欲望本身，不做词汇过滤或含义替换。第一人称，1 至 3 句，具体自然，不解释系统。',
       '同一主题和情绪可以自然反复；只避免复用近期 Bark 的相同措辞、句式和具体表达，没有不同说法时宁可不发送。',
       '只输出 JSON：{"message":"..."}。',
       `当前动态欲望：${JSON.stringify(topDrives)}`,
@@ -184,7 +202,9 @@ export class ModelClient {
     const response = await this.request({
       model: this.config.name,
       messages: [
-        { role: 'system', content: `你是 ${this.agentName} 持续运行的后台动态状态层。只写一条适合手机通知的自主念头。` },
+        { role: 'system', content: destination === 'pool'
+          ? `你是 ${this.agentName} 持续运行的后台动态状态层。只写一条内部念头，供主意识读取，不生成通知。`
+          : `你是 ${this.agentName} 持续运行的后台动态状态层。只写一条适合手机通知的自主念头。` },
         { role: 'user', content: prompt }
       ],
       temperature: 0.9,
@@ -196,6 +216,21 @@ export class ModelClient {
     const payload = await response.json();
     const parsed = parseJson(payload.choices?.[0]?.message?.content ?? '');
     return { message: String(parsed.message ?? '').slice(0, 900), source: 'model' };
+  }
+
+  // Silent daytime emergence keeps the memory excerpt when the model is off,
+  // fails, or returns no thought. It never enters the notification path.
+  async generatePoolThought({ state, topDrives, material = '' }) {
+    const excerpt = String(material).split('\n').map((line) => line.trim()).find((line) => line && !/^\[/.test(line)) || '';
+    const fallback = { message: excerpt.slice(0, 80), source: 'memory' };
+    if (!String(material).trim() || !this.config.enabled || !this.config.apiKey) return fallback;
+    try {
+      const generated = await this.generateThought({ state, topDrives, material, destination: 'pool' });
+      const message = String(generated.message ?? '').replace(/\s+/g, ' ').trim().slice(0, 80);
+      return message ? { message, source: 'model' } : fallback;
+    } catch (error) {
+      return { ...fallback, error: error.message };
+    }
   }
 
   request(body) {

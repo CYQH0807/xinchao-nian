@@ -1,11 +1,45 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, utimes, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, utimes, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import test from 'node:test';
 
 import { newState, settleState } from '../src/engine.js';
-import { NEUTRAL_DRIVE_BIAS, PERSONALITY_DIMENSIONS, PersonalityStore, computePersonalityStats, driveBiasFromCore } from '../src/personality-store.js';
+import { NEUTRAL_DRIVE_BIAS, PERSONALITY_DIMENSIONS, PersonalityStore, computePersonalityStats, driveBiasFromCore, normalizePersonalityCore } from '../src/personality-store.js';
+
+test('an anchor-only private file is not an assessment and reading never invents scores', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'xinchao-anchor-only-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const path = join(directory, 'personality.json');
+  const original = JSON.stringify({ schemaVersion: 1, anchors: [{ key: 'boundary', label: '底线' }] });
+  await writeFile(path, original);
+  const core = await new PersonalityStore(path).getPersonalityCore();
+  assert.equal(core.available, false);
+  assert.deepEqual(core.dimensions, []);
+  assert.equal(core.anchors[0].key, 'boundary');
+  const stats = computePersonalityStats(core);
+  assert.equal(stats.available, false);
+  assert.equal(stats.dimensionCount, 0);
+  assert.equal(stats.average, undefined);
+  assert.deepEqual(driveBiasFromCore(core), NEUTRAL_DRIVE_BIAS);
+  assert.equal(await readFile(path, 'utf8'), original);
+});
+
+test('explicit and legacy scored dimension shapes remain readable without metadata dimensions', () => {
+  const dimension = { key: 'love', label: '爱与依恋', score: 82, delta: 2 };
+  for (const input of [
+    { dimensions: [dimension] },
+    { core: { love: dimension } },
+    { scores: { love: dimension } },
+    [dimension],
+    { love: dimension, schemaVersion: 1, anchors: [], month: '2026-10', history: [] },
+  ]) {
+    const core = normalizePersonalityCore(input);
+    assert.equal(core.available, true);
+    assert.deepEqual(core.dimensions.map(({ key, score }) => ({ key, score })), [{ key: 'love', score: 82 }]);
+    assert.equal(computePersonalityStats(core).average, 82);
+  }
+});
 
 test('missing or damaged private personality mirror is neutral and non-fatal', async () => {
   const missing = new PersonalityStore('/definitely/missing/personality.json');
@@ -27,7 +61,7 @@ test('only the four approved personality groups bias drives and remain capped at
     { label: '恐惧', score: 0 },
   ] });
   assert.equal(bias.possess, 1.1);
-  assert.equal(bias.crave, 1.1);
+  assert.equal(bias.crave, undefined);   // 09-30 馋她并进想她
   assert.equal(bias.share, 0.9);
   assert.equal(bias.grieve, 1.1);
   assert.equal(bias.monitor, 1.1);
