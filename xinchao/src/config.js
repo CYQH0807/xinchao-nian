@@ -18,6 +18,7 @@ export function loadConfig() {
   // 自己部署的人应该设成对方真正的名字，这只是没设时的兜底。
   const notificationRecipient = process.env.NOTIFICATION_RECIPIENT ?? '你的人类';
   return {
+    pulse: { enabled: bool('PULSE', false) },
     identity: { agentName, notificationRecipient },
     port: number('PORT', 18110, 1, 65535),
     serviceToken: process.env.SERVICE_TOKEN ?? '',
@@ -115,6 +116,19 @@ export function loadConfig() {
       pollSeconds: number('BRIDGE_POLL_SECONDS', 15, 2, 300),
       // 3.3：心潮自身信号（驱力冲顶/情绪转折/挂念/醒来余韵/觉察）经桥递到 AI 窗口。默认关。
       selfSignals: bool('BRIDGE_SELF_SIGNALS', false),
+      // Existing self signals are independent of optional drive prompts.
+      drivePromptsEnabled: bool('DRIVE_PROMPTS_ENABLED', false),
+      drivePromptsPath: process.env.DRIVE_PROMPTS_FILE ?? '/app/state/drive-prompts.json',
+      drivePromptsStatePath: process.env.DRIVE_PROMPTS_STATE_PATH ?? '/app/state/drive-prompts-state.json',
+      drivePoolPath: process.env.DRIVE_POOL_PATH ?? '/app/state/drive-pool.json',
+      drivePoolEnabled: bool('DRIVE_POOL', false),
+      // Zero means no maximum, not disabled; use DRIVE_PROMPTS_ENABLED to disable.
+      drivePromptDayMax: number('DRIVE_PROMPT_DAY_MAX', 12, 0, 100),
+      drivePromptNightMax: number('DRIVE_PROMPT_NIGHT_MAX', 6, 0, 50),
+      drivePromptNightSkipChatMinutes: number('DRIVE_PROMPT_NIGHT_SKIP_CHAT_MINUTES', 0, 0, 240),
+      drivePromptMinGapMinutes: number('DRIVE_PROMPT_MIN_GAP_MINUTES', 45, 10, 600),
+      drivePromptPresentSkipMinutes: number('DRIVE_PROMPT_PRESENT_SKIP_MINUTES', 0, 0, 240),
+      callStatePath: process.env.CALL_STATE_PATH ?? '/app/state/call-state.json',
     },
     // 黑匣子（3.3）：只有 AI 能看的地方；单独文件，不进 state.json / Dashboard / 备份
     box: {

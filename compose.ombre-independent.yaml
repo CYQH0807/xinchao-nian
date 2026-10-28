@@ -1,0 +1,20 @@
+# Always build the independent Ombre 3.6.14 checkout; never the embedded copy.
+services:
+  ombre-brain:
+    build:
+      context: ${OMBRE_BRAIN_REPO:?Set OMBRE_BRAIN_REPO to the independent Ombre-Brain 3.6.14 checkout}
+      args:
+        INSTALL_CLOUDFLARED: "0"
+    image: xi-upgrade/ombre-brain:3.6.14-877c5cc
+  dynamic-mind:
+    image: xi-upgrade/xinchao:4.2.0-local
+    environment:
+      PULSE: "true"
+      DRIVE_POOL: "true"
+      DRIVE_PROMPTS_ENABLED: "true"
+      DRIVE_PROMPTS_FILE: /app/configs/drive-prompts.json
+      BRIDGE_ENABLED: "true"
+      BRIDGE_SELF_SIGNALS: "true"
+      DRIVE_PROMPT_MIN_GAP_MINUTES: "45"
+      DRIVE_PROMPT_DAY_MAX: "12"
+      DRIVE_PROMPT_NIGHT_MAX: "6"

@@ -8,7 +8,7 @@ import { emotionCoords, emotionSummary, stampEmotionArgs } from './emotion.js';
 import { recordSurfacing, resolveAwareness, scanAwareness, awarenessSummary } from './awareness.js';
 import { detectSelfSignals, renderNowLine, SELF_REPORT_TYPES } from './self-signals.js';
 import { BlackBox, renderBoxList } from './black-box.js';
-import { INTERACTION_TYPES, applyDriveFeedback, applyMemoryResonance, applyOmbreHeartbeat, applyOutputReflux, applyLongingNudge, barkAllowed, breathDreamContext, contactIdleAllowed, computeLonging, daytimeEmergenceAllowed, dreamAllowed, newState, pickIntent, proactiveBarkAllowed, recordBark, recordDaytimeEmergence, recordDream, scheduleDaytimeEmergence, settleAndApplyConversationEvent, settleState, topDrives, computeAnticipation, localDayAndHour, applySurfacedThought, surfacedDriveKey, recentSurfacedBucketIds, recordSurfacedBuckets } from './engine.js';
+import { INTERACTION_TYPES, applyDriveFeedback, applySatisfaction, applyMemoryResonance, applyOmbreHeartbeat, applyOutputReflux, applyLongingNudge, barkAllowed, breathDreamContext, contactIdleAllowed, computeLonging, daytimeEmergenceAllowed, dreamAllowed, newState, pickIntent, proactiveBarkAllowed, recordBark, recordDaytimeEmergence, recordDream, scheduleDaytimeEmergence, settleAndApplyConversationEvent, settleState, topDrives, computeAnticipation, localDayAndHour, applySurfacedThought, surfacedDriveKey, recentSurfacedBucketIds, recordSurfacedBuckets } from './engine.js';
 import { buildInteractionBridgeMessage } from './interaction-messages.js';
 import { selectUniqueBark } from './bark-dedupe.js';
 import { StateStore } from './state-store.js';
@@ -36,6 +36,12 @@ import { PersonalityStore, computePersonalityStats } from './personality-store.j
 import { HoldJobStore } from './hold-job-queue.js';
 import { HoldMediaStore, readBinaryBody, stageHoldMediaArgs } from './hold-media-store.js';
 import { canonicalInteractionSub } from './interaction-rules.js';
+import { CallStateStore, DrivePromptStore, loadDrivePrompts, pickDrivePrompt } from './drive-prompts.js';
+import { DrivePool, moodOf, slotOf, splitHint, POOL_LOW } from './drive-pool.js';
+import { DRIVE_KEYS, DRIVE_SHORT } from './dimensions.js';
+import { bodyLine, computeVitals, BodyOffsets } from './pulse.js';
+import { NowLines } from './now-lines.js';
+import { STREAM_MAX_CLIENTS, diffEvents } from './state-stream.js';
 
 // 情绪 → 记忆：只在开关打开时把此刻情绪坐标交给 OB 做共振排序。
 function emotionForOmbre(state) {
@@ -62,6 +68,20 @@ const holdMedia = new HoldMediaStore(config.holdMediaPath, {
   ttlMs: config.holdMediaTtlHours * 60 * 60 * 1000,
 });
 const blackBox = new BlackBox(config.box.statePath);
+const drivePromptStore = new DrivePromptStore(config.bridge.drivePromptsStatePath);
+const drivePool = new DrivePool(config.bridge.drivePoolPath);
+// 10-26 脉：宿主报来的临时身体偏移（运动、紧张、发烧……），只在内存里，过期自动不算；不进状态、不进记忆
+const bodyOffsets = new BodyOffsets();
+// 10-26 外接一行：只活在内存里，只给 GET /v1/now 用（见 src/now-lines.js 开头）
+const nowLines = new NowLines();
+// 10-26 订阅推送（src/state-stream.js）：连着的 SSE 客户端、每股劲儿上次推的时刻
+const stateStreams = new Set();
+const streamLastSent = new Map();
+function vitalsNow(state, now = new Date()) {
+  const nowMs = now.getTime();
+  return computeVitals(state, now, { timeZone: config.settle.timeZone, offsets: bodyOffsets.values(nowMs) });
+}
+const callStateStore = new CallStateStore(config.bridge.callStatePath);
 const bark = new BarkClient(config.bark);
 const journal = new TransitionJournal(config.journalPath);
 const oauth = new OAuthProvider(config.oauth, (event, fields = {}) => log(event, fields));
@@ -184,6 +204,17 @@ async function updateState(meta, mutate) {
     });
   } catch (error) {
     log('transition_journal_failed', { type: meta.type, message: error.message });
+  }
+  if (stateStreams.size) {
+    try {
+      for (const ev of diffEvents(before, after, new Date(), { meta, lastSent: streamLastSent })) {
+        for (const res of stateStreams) {
+          if (res.destroyed || !res.write(`event: ${ev.type}\ndata: ${JSON.stringify(ev)}\n\n`)) {
+            stateStreams.delete(res); res.destroy();
+          }
+        }
+      }
+    } catch (error) { log('state_stream_failed', { message: error.message }); }
   }
   return after;
 }
@@ -332,6 +363,34 @@ async function runCycle() {
         }, (latest) => detectSelfSignals(latest, now, { timeZone: config.settle.timeZone, dawnFreezeStart: config.settle.dawnFreezeStart, dawnFreezeEnd: config.settle.dawnFreezeEnd, awarenessReviewWeekday: config.awareness.reviewWeekday, longing: { timeZone: config.settle.timeZone, ...config.longing } }).state);
         if (preview.signals.length) log('self_signals', { kinds: preview.signals.map((s) => `${s.kind}:${s.subject}`) });
       }
+      // 驱力提示（10-15）：不靠窗口里的保活闹钟，心潮自己按节奏递。先入队再记，入队失败不记（下轮再试）
+      try {
+        const prompts = config.bridge.drivePromptsEnabled ? await loadDrivePrompts(config.bridge.drivePromptsPath) : null;
+        if (prompts) {
+          const before = await drivePromptStore.read();
+          const pick = pickDrivePrompt(state, before, prompts, now, { timeZone: config.settle.timeZone, dayMax: config.bridge.drivePromptDayMax, nightMax: config.bridge.drivePromptNightMax, nightSkipChatMinutes: config.bridge.drivePromptNightSkipChatMinutes, minGapMinutes: config.bridge.drivePromptMinGapMinutes, presentSkipMinutes: config.bridge.drivePromptPresentSkipMinutes, call: await callStateStore.read() });
+          // 10-26 念头罐：开头那句从「这股劲儿 × 这个时段」那罐里抽（同心情优先），抽不到就用话术原句；快见底就后台续罐
+          if (pick.text && pick.drive && !pick.summary && config.bridge.drivePoolEnabled) {
+            const { head } = splitHint(prompts.hints[pick.drive]);
+            if (head) {
+              const slot = slotOf(localDayAndHour(now, config.settle.timeZone).hour);
+              const mood = moodOf(state);
+              const short = DRIVE_SHORT[pick.drive] ?? pick.drive;
+              try {
+                const got = await drivePool.take(pick.drive, slot, mood);
+                if (got.text) pick.text = pick.text.replace(`）：${head}`, `）：${got.text}`);
+                if (got.left < POOL_LOW) drivePool.refill({ model, key: pick.drive, short, head, slot, mood, emotionLabel: state?.emotion?.label ?? '', log });
+              } catch (error) { log('drive_pool_failed', { message: error.message }); }
+            }
+          }
+          if (pick.text) {
+            await bridgeQueue.enqueue({ eventId: `drive-prompt-${pick.drive}-${Math.floor(now.getTime() / 60_000)}`, reason: 'self_signal', message: `${pick.text}\n${renderNowLine(state, now)}`, ttlHours: 1 }, now);
+            await publishReadyBridgeDeliveries();
+            log('drive_prompt', { drive: pick.drive, count: pick.record.count, ...(pick.summary ? { summary: true } : {}) });
+          } else if (pick.held) log('drive_prompt_held_in_call', { drive: pick.held });
+          if (JSON.stringify(pick.record) !== JSON.stringify(before)) await drivePromptStore.write(pick.record);
+        }
+      } catch (error) { log('drive_prompt_failed', { message: error.message }); }
     }
     let dreamCreated = false;
     let barkSent = false;
@@ -907,7 +966,8 @@ async function createContextEnvelope({
   let personalityAnchors = [];
   try { personalityAnchors = (await personality.getPersonalityCore(now)).anchors ?? []; } catch { personalityAnchors = []; }
   let boxCount = 0; let boxSurfaced = [];
-  try { boxCount = await blackBox.count(now); boxSurfaced = await blackBox.surfaced(now); } catch { boxCount = 0; boxSurfaced = []; }
+  let boxStaleCount = 0;
+  try { boxCount = await blackBox.count(now); boxSurfaced = await blackBox.surfaced(now); boxStaleCount = (await blackBox.stale(now)).length; } catch { boxCount = 0; boxSurfaced = []; }
   // 官方客户端版：没被 Bridge 接走的自身信号，在这里带出去（带出即 delivered）；小屋 24h 内的来信只报条数。
   let awaySignals = [];
   if (config.bridge.enabled) {
@@ -930,6 +990,7 @@ async function createContextEnvelope({
     mode,
     boxCount,
     boxSurfaced,
+    boxStale: boxStaleCount,
     awaySignals,
     cabinUnread,
     cabinLocked,
@@ -1008,7 +1069,6 @@ async function classifyExchange(event, source = 'api') {
   const parsedExchange = splitExchange(exchange);
   event.exchangeProvided = Boolean(exchange);
   event.exchangeObserved = Boolean(parsedExchange.user.trim());
-  delete event.exchange;
   const partnerWords = parsedExchange.user;
   // 留下对方原话给引擎核对和好；仅用于本次结算，不写入状态。
   if (exchange && !event.herWords && !event.her_words) event.herWords = partnerWords.slice(0, 80);
@@ -1040,6 +1100,8 @@ async function classifyExchange(event, source = 'api') {
 }
 
 async function recordConversationEvent(event, source = 'api', now = new Date()) {
+  // Apply to every event entry point, including heartbeats that skip classification.
+  if (['her_ok', 'helped_ack'].includes(event.proof) && !splitExchange(event.exchange).user.trim()) delete event.proof;
   event.sub = canonicalInteractionSub(event.interactionType ?? event.interaction_type, event.sub);
   const exchangeObserved = Boolean(event.exchangeObserved || (event.exchange && splitExchange(event.exchange).user.trim()));
   const exchangeProvided = Boolean(event.exchangeProvided || String(event.exchange ?? '').trim());
@@ -1103,11 +1165,13 @@ async function handleBox(input = {}, now = new Date()) {
   if (action === 'put') {
     const item = await blackBox.put({ text: input.text, kind: input.kind, title: input.title, expiresHours: input.expiresHours, surface: input.surface, when: input.when, remindAt: input.remindAt }, now);
     log('box_put', { id: item.id, kind: item.kind });
-    return { text: `放进匣子了：[${item.id}] ${item.kind}${item.when ? `，事在 ${item.when.slice(0, 10)}` : ''}${item.remindAt ? `，${item.remindAt.slice(5, 16).replace('T', ' ')} 提醒` : ''}${item.expiresAt ? `，${item.expiresAt.slice(0, 10)} 到期` : ''}`, data: { id: item.id, kind: item.kind, createdAt: item.createdAt, expiresAt: item.expiresAt } };
+    return { text: `放进匣子了：[${item.id}] ${item.kind}${item.when ? `，事在 ${item.when.slice(0, 10)}` : ''}${item.remindAt ? `，${item.remindAt.slice(5, 16).replace('T', ' ')} 提醒` : ''}${item.expiresAt ? `，${item.expiresAt.slice(0, 10)} 到期` : ''}${item.similar?.length ? `\n可能重复：${item.similar.map((x) => `[${x.id}] ${x.title}`).join('；')}——合并还是另放你定（合并就 burn 掉旧的或这条）` : ''}`, data: { id: item.id, kind: item.kind, createdAt: item.createdAt, expiresAt: item.expiresAt, similar: item.similar ?? [] } };
   }
   if (action === 'list') {
     const items = await blackBox.list(now);
-    return { text: `匣子里有 ${items.length} 条。\n${renderBoxList(items)}`, data: { count: items.length, ids: items.map((x) => x.id) } };
+    const stale = await blackBox.stale(now);
+    const staleIds = new Map(stale.map((x) => [x.id, x]));
+    return { text: `匣子里有 ${items.length} 条${stale.length ? `，其中 ${stale.length} 条标了 ⏳（放久了没动，或提醒过还没烧）——烧不烧你定，不会自动删` : ''}。\n${renderBoxList(items, now, staleIds)}`, data: { count: items.length, ids: items.map((x) => x.id), stale: stale.map((x) => x.id) } };
   }
   if (action === 'read') {
     const item = await blackBox.read(input.id, now);
@@ -1628,8 +1692,10 @@ const server = createServer(async (request, response) => {
     if (request.method === 'GET' && url.pathname === '/v1/now') {
       const state = await store.read();
       let boxCount = 0; let boxSurfaced = 0; let boxSurfacedIds = [];
-      try { boxCount = await blackBox.count(new Date()); const surf = await blackBox.surfaced(new Date()); boxSurfaced = surf.length; boxSurfacedIds = surf.map((x) => x.id); } catch { boxCount = 0; }
-      return send(response, 200, buildNowCompact(state, new Date(), { timeZone: config.settle.timeZone, boxCount, boxSurfaced, boxSurfacedIds, awarenessReviewWeekday: config.awareness.reviewWeekday }));
+      let boxStale = 0;
+      try { boxCount = await blackBox.count(new Date()); const surf = await blackBox.surfaced(new Date()); boxSurfaced = surf.length; boxSurfacedIds = surf.map((x) => x.id); boxStale = (await blackBox.stale(new Date())).length; } catch { boxCount = 0; }
+      const now = new Date();
+      return send(response, 200, buildNowCompact(state, now, { timeZone: config.settle.timeZone, boxCount, boxSurfaced, boxSurfacedIds, boxStale, awarenessReviewWeekday: config.awareness.reviewWeekday, body: config.pulse.enabled ? bodyLine(vitalsNow(state, now)) : '', extra: nowLines.texts(now.getTime()) }));
     }
     if (request.method === 'GET' && url.pathname === '/v1/context') {
       if (!config.context.enabled) return send(response, 503, { error: 'context envelope disabled' });
@@ -1665,9 +1731,78 @@ const server = createServer(async (request, response) => {
       const result = await recordConversationEvent(event, source);
       return send(response, 200, classified?.type ? { ...result, classified } : result);
     }
+    if (request.method === 'POST' && url.pathname === '/v1/call') {
+      // 10-20：宿主接通/挂断时告诉心潮，通话中驱力提示先压着、挂了补一条汇总
+      const payload = await body(request);
+      // 10-24：也可以只带 sleep（睡觉模式开/关），开着睡觉模式时驱力提示不压
+      const hasSleep = typeof payload?.sleep === 'boolean';
+      if (typeof payload?.active !== 'boolean' && !hasSleep) return send(response, 400, { error: 'active 要给 true / false（或只给 sleep）' });
+      const call = await callStateStore.write(typeof payload?.active === 'boolean' ? payload.active : undefined, new Date(), hasSleep ? payload.sleep : undefined);
+      log('call_state', { active: call.active, sleep: Boolean(call.sleep) });
+      return send(response, 200, call);
+    }
+    if (request.method === 'GET' && url.pathname === '/v1/stream') {
+      // 10-26 订阅推送：换档、情绪换标签、睡醒、满足，一变就推（SSE）；20 秒一个心跳注释保活
+      if (stateStreams.size >= STREAM_MAX_CLIENTS) return send(response, 429, { error: `最多 ${STREAM_MAX_CLIENTS} 个订阅` });
+      response.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-store, no-transform', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
+      response.write(`event: connected\ndata: ${JSON.stringify({ at: new Date().toISOString() })}\n\n`);
+      stateStreams.add(response);
+      const beat = setInterval(() => { if (!response.write(': heartbeat\n\n')) response.destroy(); }, 20_000);
+      beat.unref();
+      response.on('close', () => { clearInterval(beat); stateStreams.delete(response); });
+      return undefined;
+    }
+    if (url.pathname === '/v1/now-lines') {
+      // 10-26 外接一行：POST {source, text, minutes} 挂 / 覆盖；DELETE ?source= 摘掉；GET 只列来源和到期（不回内容）
+      if (request.method === 'POST') {
+        const r = nowLines.set(await body(request));
+        if (r.error) return send(response, r.status ?? 400, { error: r.error });
+        log('now_line', { source: r.source, chars: r.chars });
+        return send(response, 200, r);
+      }
+      if (request.method === 'DELETE') {
+        const source = url.searchParams.get('source') ?? '';
+        return send(response, 200, { removed: nowLines.remove(source) });
+      }
+      if (request.method === 'GET') return send(response, 200, { lines: nowLines.sources() });
+      return send(response, 405, { error: 'GET / POST / DELETE' });
+    }
+    if (url.pathname === '/v1/body' && (request.method === 'GET' || request.method === 'POST')) {
+      // 10-26 脉：GET 看此刻心跳、呼吸；POST 报一段临时偏移 {key|eventId, hr, breath, minutes}，同一个 key 后报的覆盖先报的
+      if (!config.pulse.enabled) return send(response, 404, { error: 'pulse disabled' });
+      if (request.method === 'POST') {
+        const off = bodyOffsets.set(await body(request), Date.now());
+        if (off.error) return send(response, off.status ?? 400, { error: off.error });
+        log('body_offset', { hr: off.hr, breath: off.breath, minutes: Math.round((off.until - Date.now()) / 60_000) });
+      }
+      return send(response, 200, vitalsNow(await store.read()));
+    }
     if (request.method === 'POST' && url.pathname === '/v1/handoff-note') {
       const payload = await body(request);
       return send(response, 200, await saveHandoffNote(handoffNoteFromHttp(payload), 'api'));
+    }
+    if (request.method === 'POST' && url.pathname === '/v1/satisfy') {
+      // 10-26：某股劲儿自己得到了满足（AI 自己做成了、缓过来了）：只走乘法满足 + 饱足平台；不算她来了、不叫醒、不记作息
+      const payload = await body(request);
+      const eventId = String(payload.eventId ?? payload.event_id ?? '').trim();
+      const keys = [...new Set(Array.isArray(payload.drives) ? payload.drives : [])];
+      if (!eventId || eventId.length > 120 || !keys.length || keys.some((key) => !DRIVE_KEYS.includes(key))) return send(response, 400, { error: '要给 eventId 和 drives（驱力 key 数组）' });
+      const now = new Date();
+      let applied = [];
+      const details = { drives: [] };
+      const driveBias = await personality.getDriveBias(now);
+      const state = await updateState({ type: 'satisfy', source: 'api', eventId: auditEventFingerprint(eventId), details, at: now },
+        (current) => {
+          const options = { ...config.settle, driveBias, eventId };
+          if (applySatisfaction(current, keys, now, options).duplicate) return current;
+          // Settle the preceding interval before starting a new satiety plateau;
+          // this endpoint does not mark arrival or create a sleep transition.
+          const settled = settleState(current, now, Infinity, options).state;
+          const result = applySatisfaction(settled, keys, now, options);
+          applied = result.applied; details.drives = applied; return result.state;
+        });
+      log('satisfy', { drives: applied });
+      return send(response, 200, { revision: state.revision, applied, topDrives: topDrives(state) });
     }
     if (request.method === 'POST' && url.pathname === '/v1/drive-feedback') {
       const payload = await body(request);
@@ -1723,6 +1858,10 @@ attentionTimer.unref();
 for (const signal of ['SIGINT', 'SIGTERM']) {
   process.on(signal, () => {
     clearInterval(holdTimer);
+    clearInterval(timer);
+    clearInterval(bridgeTimer);
+    clearInterval(attentionTimer);
+    for (const response of stateStreams) response.end();
     server.close(() => process.exit(0));
   });
 }

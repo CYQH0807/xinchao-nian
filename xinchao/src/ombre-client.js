@@ -69,6 +69,30 @@ export class OmbreClient {
     throw new Error('Ombre MCP call failed after session refresh');
   }
 
+  // 读记忆时 MCP 的工具错误和 JSON-RPC 错误都不能作为真实记忆原文。
+  async read(name, args = {}, timeoutMs = 15000) {
+    const result = await this.call(name, args, timeoutMs);
+    const inner = result?.result ?? result;
+    if (result?.error || result?.isError || inner?.isError) {
+      throw new OmbreToolError(name, result?.error?.message || extractText(result) || 'isError');
+    }
+    return result;
+  }
+
+  // 老 OB 没有日期筛选工具时只回退可用的普通浮现，远期原料不做伪造。
+  async breathAdvanced(args, fallback = null) {
+    if (!this.noAdvanced) {
+      try {
+        return await this.read('breath_advanced', args);
+      } catch (error) {
+        if (!(error instanceof OmbreToolError && error.unknownTool)) throw error;
+        this.noAdvanced = true;
+        console.warn(JSON.stringify({ at: new Date().toISOString(), event: 'ombre_breath_advanced_missing' }));
+      }
+    }
+    return fallback ? this.read('breath', fallback) : null;
+  }
+
   async hold(args = {}, timeoutMs = this.config.holdTimeoutMs ?? 120000) {
     const raw = await this.call('hold', args, timeoutMs);
     const payload = raw?.result ?? raw;
@@ -102,7 +126,7 @@ export class OmbreClient {
   }
 
   async recentMaterialWithRefs(drives = [], emotion = null) {
-    const result = await this.call('breath', {
+    const result = await this.read('breath', {
       ...emotionArgs(emotion),
       query: withDriveHint('近期重要记忆、情绪、关系变化和未完成事项', drives),
       max_results: this.config.breathMaxResults,
@@ -121,12 +145,14 @@ export class OmbreClient {
   // 3.3.9：exclude = 最近浮现过的桶。OB 没有排除参数，所以多要几条，本地剔掉再取回原来的条数。
   async daytimeMaterialWithRefs(drives = [], emotion = null, now = new Date(), exclude = []) {
     const want = Number(this.config.breathMaxResults) || 3;
-    const result = await this.call('breath_advanced', {
+    const maxResults = exclude.length ? Math.min(20, want + exclude.length + 2) : want;
+    const maxTokens = exclude.length ? 20000 : 12000;
+    const result = await this.breathAdvanced({
       ...emotionArgs(emotion),
       date_from: daysAgo(now, RECENT_WINDOW_DAYS),
-      max_results: exclude.length ? Math.min(20, want + exclude.length + 2) : want,
-      max_tokens: exclude.length ? 20000 : 12000   // 核心准则段每次都在最前、单独就要六千上下，后面的浮现记忆得留出位置（只是字节，不过模型）
-    });
+      max_results: maxResults,
+      max_tokens: maxTokens
+    }, { ...emotionArgs(emotion), max_results: maxResults, max_tokens: maxTokens });
     return materialWithRefs(dropBuckets(extractText(result), exclude, want), 10000);
   }
 
@@ -137,19 +163,21 @@ export class OmbreClient {
 
   async thoughtMaterialWithRefs(drives = [], emotion = null, now = new Date(), exclude = []) {
     const want = Math.max(1, Math.min(3, Number(this.config.breathMaxResults) || 2));
-    const result = await this.call('breath_advanced', {
+    const maxResults = exclude.length ? Math.min(20, want + exclude.length + 2) : want;
+    const maxTokens = exclude.length ? 16000 : 9000;
+    const result = await this.breathAdvanced({
       ...emotionArgs(emotion),
       date_from: daysAgo(now, RECENT_WINDOW_DAYS),
-      max_results: exclude.length ? Math.min(20, want + exclude.length + 2) : want,
-      max_tokens: exclude.length ? 16000 : 9000
-    });
+      max_results: maxResults,
+      max_tokens: maxTokens
+    }, { ...emotionArgs(emotion), max_results: maxResults, max_tokens: maxTokens });
     return materialWithRefs(dropBuckets(extractText(result), exclude, want), 4000);
   }
 
   // 梦的原料（3.3）：OB 的 dream 是"最近 N 小时有变动的记忆全量"——记忆正在被消化的东西。
   // 按桶拆开，去掉技术/事务类，保留主题、情感坐标和正文，封顶 maxChars。
   async digestMaterial(windowHours = 48, { maxChars = 5000, maxBuckets = 8, exclude = DREAM_EXCLUDE_DOMAINS } = {}) {
-    const result = await this.call('dream', { window_hours: windowHours }, 30000);
+    const result = await this.read('dream', { window_hours: windowHours }, 30000);
     const text = extractText(result);
     const blocks = text.split(/\n---\n/).map((b) => b.trim()).filter((b) => /^\[/.test(b));
     const picked = [];
@@ -178,12 +206,12 @@ export class OmbreClient {
     const dateTo = new Date(now.getTime() - 30 * 86_400_000).toISOString().slice(0, 10);
     // OB 3.6：日期过滤只在 breath_advanced 上（公开 breath 不收 date_to）
     // 同上：不传 query 走浮现道，只用 date_to 把窗口推到 30 天以前
-    const result = await this.call('breath_advanced', { max_results: 1, max_tokens: 10000, date_to: dateTo });
+    const result = await this.breathAdvanced({ max_results: 1, max_tokens: 10000, date_to: dateTo });
     return materialWithRefs(extractText(result), 1500);
   }
 
   async recentContinuityMaterial(maxTokens = this.config.breathMaxTokens, emotion = null) {
-    const result = await this.call('breath', {
+    const result = await this.read('breath', {
       ...emotionArgs(emotion),
       query: [
         '新窗口近期连续性：只返回最近发生了什么，以及仍直接影响现在的人物与关系变化、生活重点和未完成约定。',
@@ -497,6 +525,17 @@ export function parseHoldBucketId(text) {
   return parseGrowBucketIds(text)[0]
     ?? String(text ?? '').match(/(?:bucket[_ ]?id\s*[:=]\s*|\b)([a-f0-9]{12,160})\b/i)?.[1]
     ?? null;
+}
+
+export class OmbreToolError extends Error {
+  constructor(tool, text) {
+    super(`Ombre tool ${tool} failed: ${String(text).slice(0, 200)}`);
+    this.name = 'OmbreToolError';
+    this.tool = tool;
+    const message = String(text);
+    this.unknownTool = /unknown tool/i.test(message)
+      && (message.includes(tool) || /^unknown tool\s*[:：]?\s*$/i.test(message.trim()));
+  }
 }
 
 function parseMcp(text) {

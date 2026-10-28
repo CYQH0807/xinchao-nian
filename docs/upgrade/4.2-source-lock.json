@@ -1,0 +1,28 @@
+{
+  "xinchaoPrivateBase": "e83e8bb36509f0fede1a2212ef56d04e63c89ac8",
+  "xinchaoUpstream": "fc95da2b50d99b116c149615160eec2272d6c401",
+  "ombreIndependentVersion": "3.6.14",
+  "ombreIndependentCommit": "877c5cc5f205807dd8254304f9da005bde592d57",
+  "embeddedOmbre": "not built or modified",
+  "deployment": "not performed",
+  "xinchaoImage": {
+    "tag": "xi-upgrade/xinchao:4.2.0-local",
+    "id": "sha256:4d44f1d50ccce949b233b4a72c6ac15913eeb7ed3a90e909e6e5b392442377f4",
+    "architecture": "arm64"
+  },
+  "ombreImage": {
+    "tag": "xi-upgrade/ombre-brain:3.6.14-877c5cc",
+    "id": "sha256:0ac0f627987c3e4ea182efab154d1dd054c6bfbe5d3edc3f370902c2fae1d983",
+    "architecture": "arm64"
+  },
+  "verificationDate": "2026-10-28",
+  "sourceStatus": "local Git checkpoint; image IDs identify tested builds; no push or production deployment",
+  "experienceProfile": {
+    "pulse": true,
+    "drivePrompts": true,
+    "drivePool": true,
+    "promptsFile": "xinchao/configs/drive-prompts.json",
+    "runtimeStarted": false,
+    "realModelCallsDuringActivationValidation": 0
+  }
+}

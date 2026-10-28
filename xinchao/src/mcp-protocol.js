@@ -185,6 +185,8 @@ export const XINCHAO_TOOLS = [
           maxLength: 120,
           description: `可选，只配合 interaction_type=conflict：${RELATION_SUBJECT}那句让你不痛快的话（≤60 字）。心潮会记着在气什么，和好或气消了自动忘。`,
         },
+        proof: { type: 'string', enum: ['her_ok', 'first', 'hard', 'helped_ack'], description: '仅在有真实结果凭据时填写：人类明确认可/首次做成/克服实际困难/帮助得到回应；例行工作和自行宣称完成不算。' },
+        slip: { type: 'boolean', description: '仅在真实被指出错误、返工或原结论被证伪时填写。' },
         exchange: {
           type: 'string',
           minLength: 4,
@@ -570,6 +572,8 @@ function eventArgs(args = {}, fallbackSessionId = '') {
   if (interactionType && !INTERACTION_TYPES.has(interactionType)) {
     throw new Error('interaction_type 不在允许范围内');
   }
+  if (args.proof !== undefined && !['her_ok', 'first', 'hard', 'helped_ack'].includes(args.proof)) throw new Error('proof 不在允许范围内');
+  if (args.slip !== undefined && typeof args.slip !== 'boolean') throw new Error('slip 必须为 boolean');
   const sessionState = {};
   for (const key of ['tone', 'warmth', 'tension', 'attention', 'confidence']) {
     if (args[key] !== undefined) sessionState[key] = args[key];
@@ -579,6 +583,8 @@ function eventArgs(args = {}, fallbackSessionId = '') {
     eventId,
     interactionType,
     sessionState,
+    proof: args.proof,
+    slip: args.slip,
     sessionTtlMinutes: Math.max(15, Math.min(1440, numberOr(args.ttl_minutes, 240))),
     exchange: String(args.exchange ?? '').replace(/\s+/g, ' ').trim().slice(0, 1500) || '',
     cause: String(args.cause ?? '').replace(/\s+/g, ' ').trim().slice(0, 60) || undefined,
