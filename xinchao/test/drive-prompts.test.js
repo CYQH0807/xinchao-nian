@@ -263,6 +263,33 @@ test('她在忙（宿主传 busy）：能攒的攒，别的照常', () => {
   assert.equal(p.drive, 'possess');
 });
 
+test('回归时忙碌会推迟汇总，解除忙碌后补一次', () => {
+  const record = { day: '2026-10-15', count: 1, night: 0, last: {},
+    talkSeen: at('2026-10-15T10:00:00').toISOString(),
+    stash: [{ key: 'share', tag: '涌', reason: '刚说过', at: at('2026-10-15T10:15:00').toISOString() }] };
+  const state = base({ share: 0.95 }, { lastConversationAt: at('2026-10-15T11:00:00').toISOString() });
+  const blocked = pickDrivePrompt(state, record, sp, at('2026-10-15T11:02:00'), { timeZone: TZ, busy: '她在忙' });
+  assert.equal(blocked.text, '');
+  assert.equal(blocked.record.stash.length, 1);
+  const released = pickDrivePrompt(state, blocked.record, sp, at('2026-10-15T11:30:00'), { timeZone: TZ });
+  assert.match(released.text, /她来了/);
+  assert.deepEqual(released.released, ['share']);
+  assert.equal(pickDrivePrompt(state, released.record, sp, at('2026-10-15T11:31:00'), { timeZone: TZ }).text, '');
+});
+
+test('睡前汇总等到最短提示间隔结束才发送', () => {
+  const record = { day: '2026-10-15', count: 1, night: 0, last: {},
+    lastAt: at('2026-10-15T22:58:00').toISOString(),
+    stash: [{ key: 'share', tag: '涌', reason: '刚说过', at: at('2026-10-15T22:59:00').toISOString() }] };
+  const state = base({ share: 0.95 });
+  const blocked = pickDrivePrompt(state, record, sp, at('2026-10-15T23:00:00'), { timeZone: TZ });
+  assert.equal(blocked.text, '');
+  assert.equal(blocked.record.bedDay, undefined);
+  const released = pickDrivePrompt(state, blocked.record, sp, at('2026-10-15T23:43:00'), { timeZone: TZ });
+  assert.match(released.text, /要睡了/);
+  assert.deepEqual(released.released, ['share']);
+});
+
 test('旧记录里的 callHeld 并进 stash（原因：通话中），挂断后照样补', () => {
   const old = { day: '2026-10-15', count: 0, night: 0, last: {}, lastAt: '2026-10-15T01:30:00.000Z', callHeld: [{ key: 'share', tag: '涌' }] };
   const r = pickDrivePrompt(base({ share: 0.95 }), old, sp, at('2026-10-15T10:00:00'), { timeZone: TZ, call: { active: false } });

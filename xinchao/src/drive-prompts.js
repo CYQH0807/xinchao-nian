@@ -130,6 +130,7 @@ export function pickDrivePrompt(state, record, prompts, now = new Date(), { time
   const oldCall = Array.isArray(record?.callHeld) ? record.callHeld.map((h) => ({ key: h.key, tag: h.tag, reason: '通话中', at: h.at ?? record?.lastAt ?? iso(now) })) : [];
   rec.stash = [...(Array.isArray(record?.stash) ? record.stash : []), ...oldCall].filter((h) => nowMs - (Date.parse(h.at ?? '') || nowMs) < STASH_STALE_MS);
   delete rec.callHeld;
+  delete rec.pendingReturnAt;
   const none = { record: rec, text: '', drive: null };
   if (!prompts) return none;
   const stashable = new Set(prompts.stash ?? []);
@@ -140,20 +141,26 @@ export function pickDrivePrompt(state, record, prompts, now = new Date(), { time
   const holding = inCall && call?.sleep !== true;   // 10-24：睡觉模式开着就不压
   const lastTalk = Date.parse(state?.lastConversationAt ?? '');
   // 她来了：上一轮看到的「最后一次说话」和这一轮的隔了半小时以上 → 她离开过又回来了。每轮记下这一轮看到的
-  const prevTalk = Date.parse(rec.talkSeen ?? '');
+  const prevTalk = Date.parse(record?.talkSeen ?? '');
   const cameBack = Number.isFinite(lastTalk) && nowMs - lastTalk < STASH_BACK_MS && Number.isFinite(prevTalk) && lastTalk - prevTalk >= AWAY_MS;
   if (Number.isFinite(lastTalk)) rec.talkSeen = iso(lastTalk);
+  // 忙碌、通话或间隔可能推迟汇总。只保留确实赶上这次回来的积攒项。
+  const returnAt = cameBack ? lastTalk : Date.parse(record?.pendingReturnAt ?? '');
+  const herBack = Number.isFinite(returnAt) && rec.stash.some((h) => returnAt > (Date.parse(h.at ?? '') || 0));
+  if (herBack) rec.pendingReturnAt = iso(returnAt);
 
   // 放出来：挂断（或开了睡觉模式）/ 她来了 / 睡前。合成一条，沿用每日上限，忙时暂不发；放之前每条核一遍
   const quotaReached = night ? (nightMax > 0 && rec.night >= nightMax) : (dayMax > 0 && rec.count - rec.night >= dayMax);
+  const lastAt = Date.parse(rec.lastAt ?? '');
+  const gapBlocked = Number.isFinite(lastAt) && nowMs - lastAt < Math.max(1, Number(minGapMinutes) || 45) * 60_000;
   if (!holding && !busy && !quotaReached && rec.stash.length) {
     const hungUp = rec.stash.some((h) => h.reason === '通话中');
-    const herBack = cameBack && rec.stash.some((h) => lastTalk > (Date.parse(h.at ?? '') || 0));
     const bedtime = !night && hour >= (prompts.bedtimeHour ?? BEDTIME_HOUR) && rec.bedDay !== day;   // 睡前：每天到点放一次
-    if (hungUp || herBack || bedtime) {
+    if (hungUp || (!gapBlocked && (herBack || bedtime))) {
       const keep = rec.stash.filter((h) => stillHigh(state, h.key, now));
       const dropped = rec.stash.filter((h) => !keep.includes(h)).map((h) => h.key);
       rec = { ...rec, stash: [], ...(bedtime ? { bedDay: day } : {}) };
+      delete rec.pendingReturnAt;
       if (!keep.length) return { record: rec, text: '', drive: null, released: [], dropped };
       rec = { ...rec, count: rec.count + 1, night: rec.night + (night ? 1 : 0), lastAt: iso(now) };
       const moment = hungUp ? (call?.sleep === true && call?.active ? '开了睡觉模式' : '挂断了') : herBack ? '她来了' : '要睡了';
@@ -167,11 +174,9 @@ export function pickDrivePrompt(state, record, prompts, now = new Date(), { time
     }
   }
 
-  if (!night && hour >= (prompts.bedtimeHour ?? BEDTIME_HOUR) && rec.bedDay !== day && !holding && !busy && !quotaReached) rec.bedDay = day;   // 到点时没东西可放，也算这天的睡前过了
+  if (!night && hour >= (prompts.bedtimeHour ?? BEDTIME_HOUR) && rec.bedDay !== day && !holding && !busy && !quotaReached && !rec.stash.length) rec.bedDay = day;   // 到点时没东西可放，也算这天的睡前过了
   if (quotaReached) return none;
   if (night && nightSkipChatMinutes > 0 && Number.isFinite(lastTalk) && nowMs - lastTalk < nightSkipChatMinutes * 60_000) return none;
-  const lastAt = Date.parse(rec.lastAt ?? '');
-  const gapBlocked = Number.isFinite(lastAt) && nowMs - lastAt < Math.max(1, Number(minGapMinutes) || 45) * 60_000;
   if (gapBlocked && !stashable.size) return none;
   const present = presentSkipMinutes > 0 && Number.isFinite(lastTalk) && nowMs - lastTalk < presentSkipMinutes * 60_000;
   const stashed = new Set(rec.stash.map((h) => h.key));
