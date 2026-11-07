@@ -9,6 +9,8 @@
     "reflection": "想安静回看最近的自己。可以整理一个反复出现的念头，或写几句真实的感受。"
   },
   "held": ["possess", "monitor", "share", "curiosity", "boredom", "duty", "reflection"],
+  "stash": ["share", "curiosity"],
+  "bedtimeHour": 23,
   "night": "现在是深夜，他可能在休息。可以安静做自己的事，不必为这条提示打扰他。",
   "footer": "这是状态参考，由 Life 决定是否行动和汇报，沿用既有权限与工具约束；没有值得汇报的内容就 NO_REPORT。今天第 {n} 次。"
 }

@@ -8,7 +8,7 @@ import { emotionCoords, emotionSummary, stampEmotionArgs } from './emotion.js';
 import { recordSurfacing, resolveAwareness, scanAwareness, awarenessSummary } from './awareness.js';
 import { detectSelfSignals, renderNowLine, SELF_REPORT_TYPES } from './self-signals.js';
 import { BlackBox, renderBoxList } from './black-box.js';
-import { INTERACTION_TYPES, applyDriveFeedback, applySatisfaction, applyMemoryResonance, applyOmbreHeartbeat, applyOutputReflux, applyLongingNudge, barkAllowed, breathDreamContext, contactIdleAllowed, computeLonging, daytimeEmergenceAllowed, dreamAllowed, newState, pickIntent, proactiveBarkAllowed, recordBark, recordDaytimeEmergence, recordDream, scheduleDaytimeEmergence, settleAndApplyConversationEvent, settleState, topDrives, computeAnticipation, localDayAndHour, applySurfacedThought, surfacedDriveKey, recentSurfacedBucketIds, recordSurfacedBuckets } from './engine.js';
+import { INTERACTION_TYPES, driveTrend, applyDriveFeedback, applySatisfaction, applyMemoryResonance, applyOmbreHeartbeat, applyOutputReflux, applyLongingNudge, barkAllowed, breathDreamContext, contactIdleAllowed, computeLonging, daytimeEmergenceAllowed, dreamAllowed, newState, pickIntent, proactiveBarkAllowed, recordBark, recordDaytimeEmergence, recordDream, scheduleDaytimeEmergence, settleAndApplyConversationEvent, settleState, topDrives, computeAnticipation, localDayAndHour, applySurfacedThought, surfacedDriveKey, recentSurfacedBucketIds, recordSurfacedBuckets } from './engine.js';
 import { buildInteractionBridgeMessage } from './interaction-messages.js';
 import { selectUniqueBark } from './bark-dedupe.js';
 import { StateStore } from './state-store.js';
@@ -38,7 +38,7 @@ import { HoldMediaStore, readBinaryBody, stageHoldMediaArgs } from './hold-media
 import { canonicalInteractionSub } from './interaction-rules.js';
 import { CallStateStore, DrivePromptStore, loadDrivePrompts, pickDrivePrompt } from './drive-prompts.js';
 import { DrivePool, moodOf, slotOf, splitHint, POOL_LOW } from './drive-pool.js';
-import { DRIVE_KEYS, DRIVE_SHORT } from './dimensions.js';
+import { DRIVE_KEYS, DRIVE_SHORT, driveLevel } from './dimensions.js';
 import { bodyLine, computeVitals, BodyOffsets } from './pulse.js';
 import { NowLines } from './now-lines.js';
 import { STREAM_MAX_CLIENTS, diffEvents } from './state-stream.js';
@@ -61,6 +61,17 @@ if (config.serviceToken.length < 32) {
 
 const store = new StateStore(config.statePath, () => newState());
 const model = new ModelClient(config.model);
+const dreamBaseUrl = config.dreamModel.baseUrl || config.model.baseUrl;
+if (config.model.enabled && dreamBaseUrl !== config.model.baseUrl && !config.dreamModel.apiKey) {
+  throw new Error('DREAM_MODEL_API_KEY is required for a separate dream endpoint');
+}
+const separateDreamModel = Object.values(config.dreamModel).some(Boolean);
+const dreamModel = separateDreamModel ? new ModelClient({
+  ...config.model,
+  baseUrl: dreamBaseUrl,
+  apiKey: config.dreamModel.apiKey || config.model.apiKey,
+  name: config.dreamModel.name || config.model.name,
+}) : model;
 const ombre = new OmbreClient(config.ombre);
 const holdJobs = new HoldJobStore(config.holdJobsPath);
 const holdMedia = new HoldMediaStore(config.holdMediaPath, {
@@ -270,7 +281,8 @@ async function sendDreamPush(state, dream, now) {
       generate: async ({ recentMessages, rejectedMessage }) => {
         if (modelFailed) return dream.residue;
         try {
-          return await model.generateDreamPush({ dream, recentMessages, rejectedMessage });
+          try { return await dreamModel.generateDreamPush({ dream, recentMessages, rejectedMessage }); }
+          catch (error) { if (!separateDreamModel) throw error; log('dream_push_model_fallback', { message: error.message }); return await model.generateDreamPush({ dream, recentMessages, rejectedMessage }); }   // 10-29 同上：Gemini 忙就用平常那个
         } catch (error) {
           modelFailed = true;
           log('dream_push_model_failed', { message: error.message });
@@ -368,7 +380,7 @@ async function runCycle() {
         const prompts = config.bridge.drivePromptsEnabled ? await loadDrivePrompts(config.bridge.drivePromptsPath) : null;
         if (prompts) {
           const before = await drivePromptStore.read();
-          const pick = pickDrivePrompt(state, before, prompts, now, { timeZone: config.settle.timeZone, dayMax: config.bridge.drivePromptDayMax, nightMax: config.bridge.drivePromptNightMax, nightSkipChatMinutes: config.bridge.drivePromptNightSkipChatMinutes, minGapMinutes: config.bridge.drivePromptMinGapMinutes, presentSkipMinutes: config.bridge.drivePromptPresentSkipMinutes, call: await callStateStore.read() });
+          const pick = pickDrivePrompt(state, before, prompts, now, { timeZone: config.settle.timeZone, dayMax: config.bridge.drivePromptDayMax, nightMax: config.bridge.drivePromptNightMax, nightSkipChatMinutes: config.bridge.drivePromptNightSkipChatMinutes, minGapMinutes: config.bridge.drivePromptMinGapMinutes, presentSkipMinutes: config.bridge.drivePromptPresentSkipMinutes, call: await callStateStore.read(), busy: await attention.busyNow(now.getTime()) });
           // 10-26 念头罐：开头那句从「这股劲儿 × 这个时段」那罐里抽（同心情优先），抽不到就用话术原句；快见底就后台续罐
           if (pick.text && pick.drive && !pick.summary && config.bridge.drivePoolEnabled) {
             const { head } = splitHint(prompts.hints[pick.drive]);
@@ -386,8 +398,9 @@ async function runCycle() {
           if (pick.text) {
             await bridgeQueue.enqueue({ eventId: `drive-prompt-${pick.drive}-${Math.floor(now.getTime() / 60_000)}`, reason: 'self_signal', message: `${pick.text}\n${renderNowLine(state, now)}`, ttlHours: 1 }, now);
             await publishReadyBridgeDeliveries();
-            log('drive_prompt', { drive: pick.drive, count: pick.record.count, ...(pick.summary ? { summary: true } : {}) });
-          } else if (pick.held) log('drive_prompt_held_in_call', { drive: pick.held });
+            log('drive_prompt', { drive: pick.drive, count: pick.record.count, ...(pick.summary ? { summary: true, released: pick.released, dropped: pick.dropped } : {}) });
+          } else if (pick.held) log('drive_prompt_stashed', { drive: pick.held, reason: pick.reason });   // 10-29 攒着（通话中/她在忙/刚说过）
+          else if (pick.dropped?.length) log('drive_prompt_stash_dropped', { dropped: pick.dropped });   // 放之前核过，都落下去了
           if (JSON.stringify(pick.record) !== JSON.stringify(before)) await drivePromptStore.write(pick.record);
         }
       } catch (error) { log('drive_prompt_failed', { message: error.message }); }
@@ -446,11 +459,20 @@ async function runCycle() {
       if (config.shadowMode) {
         generated = new ModelClient({ ...config.model, enabled: false }).fallback(topDrives(state));
       } else {
+        const args = { state, material, farMaterial, topDrives: topDrives(state), avoid, emotion: emotionSummary(state, now), sleepHours };
         try {
-          generated = await model.generateDream({ state, material, farMaterial, topDrives: topDrives(state), avoid, emotion: emotionSummary(state, now), sleepHours });
+          generated = await dreamModel.generateDream(args);
         } catch (error) {
           log('dream_model_failed', { message: error.message });
-          generated = new ModelClient({ ...config.model, enabled: false }).fallback(topDrives(state));
+          // 10-29：做梦单独配了模型（Gemini 偶尔 503 太忙）时，先退回平常那个模型写，再不行才用规则拼
+          try {
+            if (!separateDreamModel) throw error;
+            generated = await model.generateDream(args);
+            log('dream_model_fallback', { to: config.model.name });
+          } catch (again) {
+            if (again !== error) log('dream_model_failed', { message: again.message, fallback: true });
+            generated = new ModelClient({ ...config.model, enabled: false }).fallback(topDrives(state));
+          }
         }
       }
 
@@ -1740,6 +1762,23 @@ const server = createServer(async (request, response) => {
       const call = await callStateStore.write(typeof payload?.active === 'boolean' ? payload.active : undefined, new Date(), hasSleep ? payload.sleep : undefined);
       log('call_state', { active: call.active, sleep: Boolean(call.sleep) });
       return send(response, 200, call);
+    }
+    if (request.method === 'GET' && url.pathname === '/v1/drives') {
+      // 10-26 给网页画驱力用：每股劲儿的短名、档位（静 / 平 / 涨 / 涌 / 落）、是不是刚被满足（饱足期里）、念头罐最近抽出的那句；不给小数
+      const state = await store.read();
+      const now = new Date();
+      const pool = config.bridge.drivePoolEnabled ? await drivePool.read() : { recent: {} };
+      const drives = DRIVE_KEYS.map((key) => {
+        const until = Date.parse(state?.satisfactionPlateaus?.[key]?.until ?? '');
+        return {
+          key,
+          name: DRIVE_SHORT[key] ?? key,
+          level: driveLevel(key, Number(state?.drives?.[key]), driveTrend(state, key, now)),
+          satisfied: Number.isFinite(until) && until > now.getTime(),
+          line: (pool.recent?.[key] ?? []).at(-1) ?? null,
+        };
+      });
+      return send(response, 200, { drives, at: now.toISOString() });
     }
     if (request.method === 'GET' && url.pathname === '/v1/stream') {
       // 10-26 订阅推送：换档、情绪换标签、睡醒、满足，一变就推（SSE）；20 秒一个心跳注释保活
