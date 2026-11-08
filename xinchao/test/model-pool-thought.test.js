@@ -47,7 +47,7 @@ test('pool thought uses the internal prompt and survives into context and the ex
   assert.ok(dynamic.content.includes(result.message));
   assert.match(dynamic.content, /非事实记录/u);
   state = applySurfacedThought(state, 'monitor', result.message, now, .45, refs).state;
-  for (let i = 0; i < 3; i++) tickThoughtPool(state.thoughtPool);
+  for (let i = 0; i < 3; i++) tickThoughtPool(state.thoughtPool, now);
   assert.equal(state.thoughtPool.obsessions[0].text, result.message);
   const signals = detectSelfSignals(state, now, { timeZone: 'UTC' }).signals;
   assert.ok(signals.some(({ kind, text }) => kind === 'obsession' && text.includes(result.message)));

@@ -13,13 +13,16 @@ const FEEDBACK_CEIL     = 0.85;
 const MAX_FEEDBACKS     = 3;
 const MAX_FLASH         = 8;
 const MAX_OBSESSIONS    = 3;
+const FLASH_TTL_MS      = 24 * 60 * 60_000;
 
 export function newThoughtPool() {
   return { flash: [], obsessions: [] };
 }
 
-export function tickThoughtPool(pool) {
+export function tickThoughtPool(pool, now = new Date(), legacyAnchor = now) {
   pool.flash = pool.flash
+    .map((t) => Number.isFinite(t.expiresAt) ? t : { ...t, expiresAt: legacyAnchor.getTime() + FLASH_TTL_MS })
+    .filter((t) => t.expiresAt > now.getTime())
     .map((t) => ({ ...t, intensity: t.intensity * (Number.isFinite(t.decay) && t.decay > 0 && t.decay < 1 ? t.decay : FLASH_DECAY), age: t.age + 1 }))
     .filter((t) => t.intensity > 0.05);
 
@@ -67,7 +70,7 @@ function normalizeMemoryRefs(metadata = {}) {
   };
 }
 
-export function addFlashThought(pool, key, text, intensity = 0.70, metadata = {}) {
+export function addFlashThought(pool, key, text, intensity = 0.70, metadata = {}, now = new Date()) {
   if (pool.flash.length >= MAX_FLASH) {
     pool.flash.sort((a, b) => a.intensity - b.intensity);
     pool.flash.shift();
@@ -77,6 +80,7 @@ export function addFlashThought(pool, key, text, intensity = 0.70, metadata = {}
     text,
     intensity: Math.min(1, intensity),
     age: 0,
+    expiresAt: now.getTime() + FLASH_TTL_MS,
     ...(Number.isFinite(metadata.decay) ? { decay: metadata.decay } : {}),
     ...normalizeMemoryRefs(metadata),
   });
@@ -94,8 +98,9 @@ export function obsessionBonus(pool, key) {
 // PROMOTE_MIN_AGE，升成 obsession —— 那时才会有界地把驱力顶上去几次然后退休。
 // 执念本来就是这么形成的，所以不完全阻尼；上限由既有池机制（MAX_FEEDBACKS）
 // 和输出本身的发送频率闸门共同兜底。
-export function reinforceThought(pool, key, text, amount = 0.30, metadata = {}) {
+export function reinforceThought(pool, key, text, amount = 0.30, metadata = {}, now = new Date()) {
   pool.flash ??= [];
+  pool.flash = pool.flash.filter((t) => !Number.isFinite(t.expiresAt) || t.expiresAt > now.getTime());
   const step = Math.min(1, Math.max(0, Number(amount) || 0));
   const existing = pool.flash.find((t) => t.key === key);
   if (existing) {
@@ -111,7 +116,7 @@ export function reinforceThought(pool, key, text, amount = 0.30, metadata = {}) 
     ])].slice(0, 8);
     return { key, intensity: Number(existing.intensity.toFixed(4)), seeded: false };
   }
-  addFlashThought(pool, key, text, step, metadata);
+  addFlashThought(pool, key, text, step, metadata, now);
   const created = pool.flash.find((t) => t.key === key);
   return { key, intensity: Number((created?.intensity ?? step).toFixed(4)), seeded: true };
 }

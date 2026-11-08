@@ -439,25 +439,39 @@ export function recordEmotionSample(state, now = new Date(), options = {}) {
 
 // 近 N 小时的走势：去重后的标签序列 + 成因计数。给信封和觉察用。
 export function emotionTrend(state, now = new Date(), hours = 24) {
-  const since = new Date(now).getTime() - hours * 3_600_000;
-  const samples = (state?.emotionJournal ?? []).filter((item) => Date.parse(item.at) >= since);
+  const until = new Date(now).getTime();
+  const since = until - hours * 3_600_000;
+  const samples = (state?.emotionJournal ?? []).filter((item) => {
+    const at = Date.parse(item.at);
+    return at >= since && at <= until && Number.isFinite(item.valence) && Number.isFinite(item.arousal);
+  });
   const labels = [];
   const causes = {};
   let minValence = 1;
+  let maxValence = 0;
+  let minArousal = 1;
   let maxArousal = 0;
   for (const item of samples) {
     if (labels.at(-1) !== item.label) labels.push(item.label);
     if (item.cause) causes[item.cause] = (causes[item.cause] ?? 0) + 1;
     minValence = Math.min(minValence, item.valence);
+    maxValence = Math.max(maxValence, item.valence);
+    minArousal = Math.min(minArousal, item.arousal);
     maxArousal = Math.max(maxArousal, item.arousal);
   }
-  return { hours, samples: samples.length, labels, causes, minValence: samples.length ? round4(minValence) : null, maxArousal: samples.length ? round4(maxArousal) : null };
+  return { hours, samples: samples.length, labels, causes,
+    minValence: samples.length ? round4(minValence) : null,
+    maxValence: samples.length ? round4(maxValence) : null,
+    minArousal: samples.length ? round4(minArousal) : null,
+    maxArousal: samples.length ? round4(maxArousal) : null,
+  };
 }
 
 export function renderEmotionTrend(trend) {
-  if (!trend || trend.samples < 2 || trend.labels.length < 2) return '';
+  if (!trend || trend.samples < 2) return '';
   const causes = Object.entries(trend.causes).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([k, n]) => `${k}×${n}`).join('，');
-  return `近${trend.hours}小时情绪走过：${trend.labels.join('→')}${causes ? `（${causes}）` : ''}`;
+  const path = trend.labels.length === 1 ? `标签维持「${trend.labels[0]}」` : trend.labels.join('→');
+  return `近${trend.hours}小时情绪：${path}；愉悦 ${trend.minValence.toFixed(2)}–${trend.maxValence.toFixed(2)}，唤醒 ${trend.minArousal.toFixed(2)}–${trend.maxArousal.toFixed(2)}${causes ? `（${causes}）` : ''}`;
 }
 
 // ── 细一点的情绪描述（给"此刻"块用）────────────────────────────────

@@ -1139,7 +1139,7 @@ async function recordConversationEvent(event, source = 'api', now = new Date()) 
   delete event.mcpDeclaredType;
   delete event.mcpSelfReportGated;
   let applied;
-  const auditDetails = {};
+  const auditDetails = { exchangeProvided, exchangeObserved };
   const driveBias = await personality.getDriveBias(now);
   const state = await updateState({
     type: source === 'heartbeat' ? 'conversation_heartbeat' : 'conversation_event',
@@ -1763,6 +1763,20 @@ const server = createServer(async (request, response) => {
       log('call_state', { active: call.active, sleep: Boolean(call.sleep) });
       return send(response, 200, call);
     }
+    if (request.method === 'DELETE' && url.pathname === '/v1/flash-thought') {
+      // 宿主确认事项完成后，按闪念的主记忆桶精确清理，不删除记忆。
+      const bucketId = url.searchParams.get('bucketId') ?? '';
+      if (!/^[A-Za-z0-9._-]{1,160}$/u.test(bucketId)) return send(response, 400, { error: 'invalid_bucket_id' });
+      const details = { removed: 0 };
+      await updateState({ type: 'flash_thought_completed', source: 'api', details, at: new Date() }, (current) => {
+        const pool = current.thoughtPool;
+        const flash = (pool?.flash ?? []).filter((thought) => thought.ombreBucketId !== bucketId);
+        details.removed = (pool?.flash?.length ?? 0) - flash.length;
+        if (!details.removed) return current;
+        return { ...current, revision: current.revision + 1, thoughtPool: { ...pool, flash } };
+      });
+      return send(response, 200, details);
+    }
     if (request.method === 'GET' && url.pathname === '/v1/drives') {
       // 10-26 给网页画驱力用：每股劲儿的短名、档位（静 / 平 / 涨 / 涌 / 落）、是不是刚被满足（饱足期里）、念头罐最近抽出的那句；不给小数
       const state = await store.read();
@@ -1773,6 +1787,7 @@ const server = createServer(async (request, response) => {
         return {
           key,
           name: DRIVE_SHORT[key] ?? key,
+          strengthPercent: Math.round(Math.min(1, Math.max(0, Number(state?.drives?.[key]) || 0)) * 100),
           level: driveLevel(key, Number(state?.drives?.[key]), driveTrend(state, key, now)),
           satisfied: Number.isFinite(until) && until > now.getTime(),
           line: (pool.recent?.[key] ?? []).at(-1) ?? null,

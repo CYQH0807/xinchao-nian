@@ -52,12 +52,21 @@ test('trend line appears in envelope once emotion has moved, and dashboard expos
   state = applyConversationEvent(state, ev('intimacy', 't3'), at(1)).state;
   const trend = emotionTrend(state, at(1));
   assert.ok(trend.labels.length >= 2);
-  assert.match(renderEmotionTrend(trend), /近24小时情绪走过：/);
+  assert.match(renderEmotionTrend(trend), /近24小时情绪：.*愉悦.*唤醒/);
   const envelope = buildContextEnvelope({ state, sessionId: 's1', now: at(1) });
-  assert.match(envelope.sections[0].content, /情绪走过/);
+  assert.match(envelope.sections[0].content, /近24小时情绪/);
   const snapshot = buildDashboardSnapshot(state, {}, at(1));
   assert.ok(Array.isArray(snapshot.emotion.journal) && snapshot.emotion.journal.length >= 2);
   assert.ok(snapshot.emotion.days['2026-09-05']);
+});
+
+test('emotion trend preserves sampled variation within one label', () => {
+  const state = baseState();
+  state.emotionJournal = [
+    { at: at(0).toISOString(), label: '平静', valence: 0.55, arousal: 0.29 },
+    { at: at(1).toISOString(), label: '平静', valence: 0.67, arousal: 0.39 },
+  ];
+  assert.match(renderEmotionTrend(emotionTrend(state, at(1))), /标签维持「平静」；愉悦 0.55–0.67，唤醒 0.29–0.39/u);
 });
 
 test('old states without a journal upgrade cleanly', () => {

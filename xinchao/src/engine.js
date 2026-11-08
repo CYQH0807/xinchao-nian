@@ -416,7 +416,7 @@ export function applyDreamWake(state, dream, now = new Date()) {
   const key = ALL_DRIVE_KEYS.includes(dream?.driveKey) ? dream.driveKey : (topDrives(state, 1)[0]?.key ?? null);
   if (text && key) {
     state.thoughtPool ??= newThoughtPool();
-    addFlashThought(state.thoughtPool, key, text.slice(0, 80), 0.62, { decay: DREAM_DECAY, ombreBucketId: dream.ombreBucketId ?? null, sourceOmbreBucketIds: dream.sourceOmbreBucketIds ?? [] });
+    addFlashThought(state.thoughtPool, key, text.slice(0, 80), 0.62, { decay: DREAM_DECAY, ombreBucketId: dream.ombreBucketId ?? null, sourceOmbreBucketIds: dream.sourceOmbreBucketIds ?? [] }, now);
   }
   return state;
 }
@@ -428,7 +428,7 @@ export function applySurfacedThought(input, driveKey, text, now = new Date(), am
   const state = ensureStateShape(structuredClone(input));
   if (!DRIVE_KEYS.includes(driveKey) || !String(text ?? '').trim()) return { state, changed: false };
   state.thoughtPool ??= newThoughtPool();
-  const result = reinforceThought(state.thoughtPool, driveKey, String(text).trim().slice(0, 80), amount, { decay: SURFACED_DECAY, ...metadata });
+  const result = reinforceThought(state.thoughtPool, driveKey, String(text).trim().slice(0, 80), amount, { decay: SURFACED_DECAY, ...metadata }, now);
   state.revision += 1;
   return { state, changed: true, ...result };
 }
@@ -692,7 +692,8 @@ export function settleState(input, now = new Date(), sleepAfterMinutes = 90, opt
 
   // Tick thought pool
   state.thoughtPool ??= newThoughtPool();
-  const feedbacks = tickThoughtPool(state.thoughtPool);
+  const previousSettlement = Date.parse(state.lastSettledAt ?? '');
+  const feedbacks = tickThoughtPool(state.thoughtPool, now, Number.isFinite(previousSettlement) ? new Date(previousSettlement) : now);
   for (const [key, amount] of Object.entries(feedbacks)) {
     if (DRIVE_KEYS.includes(key)) {
       const before = Number(state.drives[key]);
@@ -861,7 +862,7 @@ export function applyConversationEvent(input, event = {}, now = new Date(), opti
   // Flash thoughts from significant events
   for (const thought of event.flashThoughts ?? []) {
     if (DRIVE_KEYS.includes(thought.key)) {
-      addFlashThought(state.thoughtPool, thought.key, thought.text ?? '', thought.intensity ?? 0.70);
+      addFlashThought(state.thoughtPool, thought.key, thought.text ?? '', thought.intensity ?? 0.70, {}, now);
     }
   }
 
@@ -1045,7 +1046,7 @@ export function applyOutputReflux(input, driveKey, text = '', now = new Date(), 
     return { state, applied: false, reasonCode: 'unknown_drive', key: driveKey || null };
   }
   state.thoughtPool ??= newThoughtPool();
-  const result = reinforceThought(state.thoughtPool, driveKey, text, amount, metadata);
+  const result = reinforceThought(state.thoughtPool, driveKey, text, amount, metadata, now);
   state.revision += 1;
   return {
     state,
@@ -1209,6 +1210,12 @@ function compactDreamText(value, maxChars = 280) {
   return text.length <= maxChars ? text : `${text.slice(0, maxChars - 1)}…`;
 }
 
+/** Treat punctuation-only placeholders as missing dream residue. */
+export function dreamResidueText(value, maxChars = 280) {
+  const text = compactDreamText(value, maxChars);
+  return /^[.…⋯。\s]*$/u.test(text) ? '' : text;
+}
+
 export function breathDreamContext(input, now = new Date(), maxAgeHours = 18, maxDreams = 3) {
   const cutoff = now.getTime() - Math.max(1, Number(maxAgeHours) || 18) * 3_600_000;
   const limit = Math.max(1, Math.min(3, Number(maxDreams) || 3));
@@ -1221,10 +1228,10 @@ export function breathDreamContext(input, now = new Date(), maxAgeHours = 18, ma
     .map((dream) => ({
       id: dream.id,
       createdAt: dream.createdAt,
-      summary: compactDreamText(dream.awareness || dream.residue),
-      residue: compactDreamText(dream.residue),
-    }))
-    .filter((dream) => dream.summary || dream.residue);
+      summary: dreamResidueText(dream.awareness) || dreamResidueText(dream.residue),
+      residue: dreamResidueText(dream.residue),
+      source: dream.source === 'rules' ? 'rules' : dream.source === 'model' ? 'model' : 'unknown',
+    }));
   return { version: 1, available: dreams.length > 0, dreams };
 }
 

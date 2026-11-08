@@ -65,3 +65,19 @@ test('surfaced thoughts decay slowly enough to survive until the next surfacing,
   assert.equal(state.thoughtPool.obsessions.length, 1);
   assert.equal(state.thoughtPool.obsessions[0].key, 'possess');
 });
+
+test('flash expires by wall clock even after reinforcement or missed settlement ticks', () => {
+  const start = new Date('2026-11-07T00:00:00Z');
+  const before = new Date('2026-11-07T23:59:00Z');
+  const deadline = new Date('2026-11-08T00:00:00Z');
+  const thoughts = newThoughtPool();
+  addFlashThought(thoughts, 'share', '短暂的闪念', 0.7, {}, start);
+  pool.reinforceThought(thoughts, 'share', '', 0.1, {}, before);
+  tickThoughtPool(thoughts, before, start);
+  assert.equal(thoughts.flash.length, 1);
+  tickThoughtPool(thoughts, deadline, before);
+  assert.equal(thoughts.flash.length, 0);
+  thoughts.flash.push({ key: 'share', intensity: 0.7, age: 0 });
+  tickThoughtPool(thoughts, deadline, start);
+  assert.equal(thoughts.flash.length, 0);
+});

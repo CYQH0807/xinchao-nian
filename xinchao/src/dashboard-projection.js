@@ -4,7 +4,7 @@
 import { AXES, moodOf } from './core-axes.js';
 import { recentMarks } from './emotion-marks.js';
 import { DIMENSIONS, DRIVE_KEYS, DRIVE_SHORT, driveLevel } from './dimensions.js';
-import { driveTrend } from './engine.js';
+import { dreamResidueText, driveTrend } from './engine.js';
 import { driveSub } from './mixed-feelings.js';
 import { buildConnectionDiagnostics } from './connection-diagnostics.js';
 import { emotionSummary } from './emotion.js';
@@ -91,6 +91,7 @@ function projectedThoughts(state, includePrivateText = false) {
 function projectedDreams(state, includePrivateText, limit = 12) {
   const dreams = Array.isArray(state?.recentDreams) ? state.recentDreams : [];
   return dreams.slice(-Math.max(1, Math.min(30, Number(limit) || 12))).reverse().map((dream) => {
+    const residue = dreamResidueText(dream?.residue, 1200);
     const summary = compact(dream?.summary || dream?.awareness, 360) || null;
     const lucidityNumber = Number(dream?.lucidity);
     const lucidity = dream?.lucidity != null && Number.isFinite(lucidityNumber)
@@ -101,7 +102,7 @@ function projectedDreams(state, includePrivateText, limit = 12) {
       createdAt: validDate(dream?.createdAt),
       source: compact(dream?.source, 60) || 'unknown',
       hasDream: Boolean(compact(dream?.dream)),
-      hasResidue: Boolean(compact(dream?.residue)),
+      hasResidue: Boolean(residue),
       hasSummary: Boolean(summary),
       hasAwareness: Boolean(compact(dream?.awareness)),
       lucidity,
@@ -111,7 +112,7 @@ function projectedDreams(state, includePrivateText, limit = 12) {
         image: compact(dream?.image, 24) || null,
         dream: compact(dream?.dream, 4000) || null,
         summary,
-        residue: compact(dream?.residue, 1200) || null,
+        residue: residue || null,
         awareness: compact(dream?.awareness, 1200) || null,
       } : {}),
     };

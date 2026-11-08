@@ -75,6 +75,7 @@ function thoughtSignals(state) {
     flash: (state.thoughtPool?.flash ?? []).slice(0, 3).map((item) => ({
       key: item.key,
       text: compact(item.text).slice(0, 80),
+      bucketId: typeof item.ombreBucketId === 'string' && /^[A-Za-z0-9._-]{1,160}$/u.test(item.ombreBucketId) ? item.ombreBucketId : null,
       intensity: Number(Number(item.intensity ?? 0).toFixed(3)),
       age: Number(item.age ?? 0),
     })),
@@ -166,7 +167,8 @@ function renderDynamic(value) {
       + `confidence=${value.session.confidence.toFixed(3)}`,
     );
   }
-  const flashes = value.thoughts.flash.slice(0, 2).filter((item) => item.text).map((item) => item.text).join('；');
+  const flashes = value.thoughts.flash.slice(0, 2).filter((item) => item.text)
+    .map((item) => item.bucketId ? `${item.text}（记忆桶 ID：${item.bucketId}）` : item.text).join('；');
   if (flashes) parts.push(`闪念（内在材料，非事实记录）：${flashes}`);
   const obsessions = value.thoughts.obsessions
     .map((item) => `${item.key}:${item.intensity.toFixed(3)}${item.text ? `·${item.text}` : ''}`)
@@ -178,9 +180,9 @@ function renderDynamic(value) {
 
 function renderDreams(state, now) {
   const result = breathDreamContext(state, now, 18, 2);
-  if (!result.available) return '';
+  if (!result.available) return '近 18 小时没有梦境记录。';
   return result.dreams
-    .map((item) => `${item.createdAt}｜${compact(item.summary || item.residue)}`)
+    .map((item) => `${item.createdAt}｜${item.source === 'rules' ? '规则生成 · ' : ''}${item.residue || '有梦境记录，未留余韵'}${item.summary && item.summary !== item.residue ? ` · 觉察：${item.summary}` : ''}`)
     .join('\n');
 }
 
